@@ -243,6 +243,12 @@ export class OrderService {
       }
       return null;
     }
+    if (p.slotKey.startsWith("clock:")) {
+      if ((await this.d.store.countOrdersInSlot(p.slotKey)) >= this.d.maxActiveOrders) {
+        return `${p.label[0]!.toUpperCase()}${p.label.slice(1)} is full. Want a different time, or right away?`;
+      }
+      return null;
+    }
     // Orders scheduled for later intermissions don't count against the kitchen's right-now limit.
     if ((await this.d.store.countActiveAsapOrders((this.d.now ?? (() => new Date()))())) >= this.d.maxActiveOrders) {
       return "The kitchen is at its limit for text orders right now. Try again in a few minutes, or order at the window.";

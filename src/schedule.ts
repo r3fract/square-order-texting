@@ -14,6 +14,8 @@ export interface ScheduleDeps {
   tz: string;
   sendCustomer: (phone: string, text: string) => Promise<boolean>;
   notifyOwner: (text: string) => Promise<void>;
+  /** Order ids the owner was already alerted about, so a stuck order doesn't alert on every poll. */
+  alerted?: Set<string>;
 }
 
 /** Moves paid, not-yet-ready game-slot orders to follow a new intermission estimate. */
@@ -36,6 +38,8 @@ export async function reconcileSchedule(d: ScheduleDeps, _prev: Timeline | null,
         order.pickupAt = newStart;
         await d.store.updateOrder(order.id, { pickupAt: newStart });
       } catch {
+        if (d.alerted?.has(order.id)) continue;
+        d.alerted?.add(order.id);
         await d.notifyOwner(`⚠️ Couldn't move order #${order.orderNumber} to ${shortTime(newStart, d.tz)} in Square. It may be ready early.`);
         if (!order.etaNotifiedAt && order.quotedReadyAt) {
           await d.sendCustomer(order.phone, `Heads up: order #${order.orderNumber} may be ready a little before ${shortTime(order.quotedReadyAt, d.tz)}.`);

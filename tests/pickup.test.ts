@@ -41,8 +41,27 @@ describe("resolvePickup", () => {
 
   it("a clock time later today", () => {
     expect(resolvePickup({ kind: "clock", hhmm: "15:30" }, null, false, PRE, TZ)).toEqual({
-      ok: true, pickupAt: new Date("2026-11-08T20:30:00Z"), slotKey: "clock", label: "about 3:30",
+      ok: true, pickupAt: new Date("2026-11-08T20:30:00Z"), slotKey: "clock:2026-11-08T20:30:00.000Z", label: "about 3:30",
     });
+  });
+
+  it("clock times share a 15-minute capacity bucket", () => {
+    const r = resolvePickup({ kind: "clock", hhmm: "15:40" }, null, false, PRE, TZ);
+    expect(r).toMatchObject({ ok: true, slotKey: "clock:2026-11-08T20:30:00.000Z" });
+  });
+
+  it("impossible clock times are refused, not rolled into tomorrow", () => {
+    for (const hhmm of ["25:99", "24:00", "14:60", "7"]) {
+      expect(resolvePickup({ kind: "clock", hhmm }, null, false, PRE, TZ)).toEqual({ ok: false, reason: "I didn't catch that time. Try something like 8:15." });
+    }
+  });
+
+  it("a clock time after closing is refused", () => {
+    const openUntil4pm = (d: Date) => d < new Date("2026-11-08T21:00:00Z");
+    expect(resolvePickup({ kind: "clock", hhmm: "17:00" }, null, false, PRE, TZ, openUntil4pm)).toEqual({
+      ok: false, reason: "We're closed by then. Want it right away, or an earlier time?",
+    });
+    expect(resolvePickup({ kind: "clock", hhmm: "15:30" }, null, false, PRE, TZ, openUntil4pm)).toMatchObject({ ok: true });
   });
 
   it("a clock time that already passed is refused", () => {
@@ -170,6 +189,16 @@ describe("ordering for an intermission", () => {
 
     expect(t.square.orders.get("SQORD1")!.pickupAt).toBe("2026-11-08T21:56:15.000Z");
     expect(t.sms.last(PHONE)).toBe("Heads up: the 2nd period is running long. Order #1 will be ready about 4:56.");
+  });
+
+  it("clock-time orders have a capacity limit too", async () => {
+    const t = setup({ MAX_ACTIVE_ORDERS: "1" });
+    for (const phone of ["+18075550001", "+18075550002"]) {
+      t.model.push(tool("set_cart", LINES), tool("set_pickup_time", { target: "clock", clock: "15:30" }), tool("send_checkout_link"), say("ok"));
+      await t.text("poutine at 3:30", phone);
+    }
+    expect(t.square.links.size).toBe(1);
+    expect(JSON.stringify(t.model.requests.at(-1)!.messages.at(-1))).toContain("About 3:30 is full. Want a different time, or right away?");
   });
 
   it("ASAP paid text says the place in line", async () => {

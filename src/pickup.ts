@@ -21,7 +21,7 @@ export function shortTime(d: Date, tz: string): string {
 /** Local wall-clock HH:MM today in `tz` → the matching instant. */
 function todayAt(hhmm: string, now: Date, tz: string): Date | null {
   const m = hhmm.match(/^(\d{1,2}):(\d{2})$/);
-  if (!m) return null;
+  if (!m || +m[1]! > 23 || +m[2]! > 59) return null; // no rolling "25:99" into tomorrow
   const parts = Object.fromEntries(
     new Intl.DateTimeFormat("en-US", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hourCycle: "h23" })
       .formatToParts(now)
@@ -36,15 +36,29 @@ function todayAt(hhmm: string, now: Date, tz: string): Date | null {
 const NO_GAME = "There's no Lakers home game today.";
 const NO_CLOCK = "I can't see the game clock right now, so I can do right away or a time like 8:15.";
 
-/** Turns what the customer asked for into a pickup time and a capacity slot. The AI never computes times. */
-export function resolvePickup(t: PickupTarget, today: GameToday | null, gameUsable: boolean, now: Date, tz: string): ResolvedPickup {
+const CLOCK_BUCKET_MS = 15 * 60_000;
+
+/**
+ * Turns what the customer asked for into a pickup time and a capacity slot. The AI never computes times.
+ * `isOpenAt` keeps clock pickups inside ordering hours. Clock pickups share a capacity slot per 15 minutes.
+ */
+export function resolvePickup(
+  t: PickupTarget,
+  today: GameToday | null,
+  gameUsable: boolean,
+  now: Date,
+  tz: string,
+  isOpenAt: (d: Date) => boolean = () => true,
+): ResolvedPickup {
   if (t.kind === "asap") return { ok: true, pickupAt: null, slotKey: "asap", label: "right away" };
 
   if (t.kind === "clock") {
     const at = todayAt(t.hhmm, now, tz);
     if (!at) return { ok: false, reason: "I didn't catch that time. Try something like 8:15." };
     if (at <= now) return { ok: false, reason: "That time has already passed. Want it right away?" };
-    return { ok: true, pickupAt: at, slotKey: "clock", label: `about ${shortTime(at, tz)}` };
+    if (!isOpenAt(at)) return { ok: false, reason: "We're closed by then. Want it right away, or an earlier time?" };
+    const bucket = new Date(Math.floor(at.getTime() / CLOCK_BUCKET_MS) * CLOCK_BUCKET_MS);
+    return { ok: true, pickupAt: at, slotKey: `clock:${bucket.toISOString()}`, label: `about ${shortTime(at, tz)}` };
   }
 
   const game = today?.game;

@@ -39,6 +39,11 @@ export class HoursService {
     private ttlMs = 15 * 60_000,
   ) {}
 
+  /** Last known hours without calling Square (for synchronous checks). */
+  peek(): OrderingHours {
+    return this.override ?? this.lastGood;
+  }
+
   async current(): Promise<OrderingHours> {
     if (this.override) return this.override;
     if (this.cached && Date.now() - this.cached.at < this.ttlMs) return this.cached.hours;

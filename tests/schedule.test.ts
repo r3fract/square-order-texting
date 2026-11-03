@@ -22,6 +22,7 @@ async function setup() {
     square, store, now: () => new Date("2026-11-08T21:00:00Z"), tz: TZ,
     sendCustomer: async (to: string, body: string) => (texts.push({ to, body }), true),
     notifyOwner: async (t: string) => void owner.push(t),
+    alerted: new Set<string>(),
   };
   const saved = async () => (await store.getOrderBySquareId(sq.id!))!;
   return { store, square, deps, texts, owner, saved, squareId: sq.id! };
@@ -68,6 +69,16 @@ describe("keeping scheduled orders in step with the game", () => {
     expect(t.owner).toEqual(["⚠️ Couldn't move order #12 to 4:51 in Square. It may be ready early."]);
     expect(t.texts).toEqual([{ to: "+18075551234", body: "Heads up: order #12 may be ready a little before 4:43." }]);
     expect((await t.saved()).pickupAt).toEqual(T);
+  });
+
+  it("a stuck order alerts the owner once, not every poll", async () => {
+    const t = await setup();
+    for (const m of [8, 9, 10]) {
+      t.square.failNext.updatePickupAt = new SquareError("nope", 400);
+      await reconcileSchedule(t.deps, null, tl(new Date(T.getTime() + min(m))));
+    }
+    expect(t.owner).toHaveLength(1);
+    expect(t.texts).toHaveLength(1);
   });
 
   it("untrustworthy timeline leaves orders alone", async () => {

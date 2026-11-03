@@ -39,6 +39,8 @@ export class TextOrderService {
   /** Null when the HockeyTech settings aren't all set. */
   readonly game: GameService | null;
   private locks = new Map<string, Promise<unknown>>();
+  /** Orders the owner was already told Square wouldn't move (one alert each). */
+  private scheduleAlerted = new Set<string>();
   private now: () => Date;
   private log: (msg: string, extra?: unknown) => void;
 
@@ -110,7 +112,9 @@ export class TextOrderService {
   resolve(t: PickupTarget): ResolvedPickup {
     const game = this.game?.homeGameToday() ?? null;
     const today = game ? { game, timeline: this.game!.state()?.timeline ?? null } : null;
-    return resolvePickup(t, today, this.game?.usable() ?? false, this.now(), this.d.config.TIMEZONE);
+    const hours = this.hoursService.peek();
+    const tz = this.d.config.TIMEZONE;
+    return resolvePickup(t, today, this.game?.usable() ?? false, this.now(), tz, (d) => isOpen(hours, d, tz));
   }
 
   /** Called by the game poller whenever the intermission estimate changes: scheduled orders follow the game. */
@@ -123,6 +127,7 @@ export class TextOrderService {
         tz: this.d.config.TIMEZONE,
         sendCustomer: (p, t) => this.sendCustomer(p, t),
         notifyOwner: (t) => this.notifyOwner(t),
+        alerted: this.scheduleAlerted,
       },
       prev,
       next,
@@ -402,7 +407,7 @@ export class TextOrderService {
       const label = slot.endsWith(":end") ? "after the game" : `the ${ordinal(Number(slot.slice(-1)))} intermission`;
       return `Paid, thanks! Order #${order.orderNumber}. You're ${ordinal(ahead + 1)} for ${label}, ready about ${shortTime(order.pickupAt, this.d.config.TIMEZONE)}. ${tail}`;
     }
-    if (slot === "clock" && order.pickupAt) {
+    if (slot.startsWith("clock") && order.pickupAt) {
       return `Paid, thanks! Order #${order.orderNumber}. Ready about ${shortTime(order.pickupAt, this.d.config.TIMEZONE)}. ${tail}`;
     }
     const inLine = await this.d.store.countActiveAsapOrders(this.now());
