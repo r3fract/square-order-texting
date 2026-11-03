@@ -45,6 +45,17 @@ async function main() {
     await sms.send(config.OWNER_PHONE, msg).catch((err) => console.error("couldn't text owner", err));
   }
 
+  if (service.game) {
+    await service.game.load();
+    await service.game.tick().catch((err) => console.error("game tick failed", err));
+    console.log(`Game feed on: ${service.game.describe(config.TIMEZONE)}`);
+  } else {
+    console.log("Game feed off (set HOCKEYTECH_KEY, HOCKEYTECH_CLIENT_CODE, HOCKEYTECH_TEAM_ID to turn it on).");
+  }
+  const gameTimer = setInterval(() => {
+    service.game?.tick().catch((err) => console.error("game tick failed", err));
+  }, 30_000);
+
   const sweeper = setInterval(() => {
     service.expireStaleLinks().catch((err) => console.error("expire sweep failed", err));
   }, 60_000);
@@ -54,6 +65,7 @@ async function main() {
 
   const shutdown = async () => {
     clearInterval(sweeper);
+    clearInterval(gameTimer);
     await app.close();
     if (store instanceof PostgresStore) await store.close();
     process.exit(0);

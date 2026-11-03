@@ -2,6 +2,9 @@ import { runAgentTurn, type AgentDeps, type ModelClient } from "./agent.js";
 import type { Config } from "./config.js";
 import { describeHours, isOpen, keyword, nextOpeningText, normalizePhone, redactCardNumbers } from "./guards.js";
 import { CustomerService } from "./customers.js";
+import { fetchScorebar, type FeedGame } from "./game/hockeytech.js";
+import { GameService } from "./game/service.js";
+import type { Timeline } from "./game/timeline.js";
 import { HoursService } from "./hours.js";
 import { OrderService } from "./orders.js";
 import type { SquareApi } from "./square/client.js";
@@ -21,6 +24,8 @@ export interface ServiceDeps {
   model: ModelClient;
   now?: () => Date;
   log?: (msg: string, extra?: unknown) => void;
+  /** Tests inject the feed; production fetches HockeyTech. */
+  fetchGames?: () => Promise<FeedGame[]>;
 }
 
 /** Everything the webhooks call into. No HTTP here, so it can be tested directly. */
@@ -29,6 +34,8 @@ export class TextOrderService {
   readonly orders: OrderService;
   readonly hoursService: HoursService;
   readonly customers: CustomerService;
+  /** Null when the HockeyTech settings aren't all set. */
+  readonly game: GameService | null;
   private locks = new Map<string, Promise<unknown>>();
   private now: () => Date;
   private log: (msg: string, extra?: unknown) => void;
@@ -39,6 +46,22 @@ export class TextOrderService {
     this.menus = new MenuService(d.square, d.config.SQUARE_LOCATION_ID);
     this.hoursService = new HoursService(d.square, d.config.hours);
     this.customers = new CustomerService(d.square, () => this.now(), (m, e) => this.log(m, e));
+    const { HOCKEYTECH_KEY: key, HOCKEYTECH_CLIENT_CODE: clientCode, HOCKEYTECH_TEAM_ID: teamId } = d.config;
+    this.game =
+      d.fetchGames || (key && clientCode && teamId)
+        ? new GameService({
+            fetchGames: d.fetchGames ?? (() => fetchScorebar({ key: key!, clientCode: clientCode! })),
+            store: d.store,
+            teamId: teamId ?? null,
+            tz: d.config.TIMEZONE,
+            now: () => this.now(),
+            secondsPerClockMinute: d.config.GAME_SECONDS_PER_CLOCK_MINUTE,
+            intermissionMinutes: d.config.GAME_INTERMISSION_MINUTES,
+            notifyOwner: (t) => this.notifyOwner(t),
+            onTimelineChange: (prev, next) => this.onTimelineChange(prev, next),
+            log: (m, e) => this.log(m, e),
+          })
+        : null;
     this.orders = new OrderService({
       square: d.square,
       menus: this.menus,
@@ -77,6 +100,9 @@ export class TextOrderService {
     }
     return { open: true, message: "Text ordering is open." };
   }
+
+  /** Called by the game poller whenever the intermission estimate changes. Scheduled orders follow in Task 7. */
+  private async onTimelineChange(_prev: Timeline | null, _next: Timeline): Promise<void> {}
 
   /** Ordering hours right now: the ORDERING_HOURS override, else Square business hours. */
   hours() {

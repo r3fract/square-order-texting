@@ -37,6 +37,16 @@ const Env = z.object({
   ANTHROPIC_MODEL: z.string().default("claude-sonnet-5-5"),
 
   ADMIN_TOKEN: z.string().min(16), // bearer token for /admin endpoints
+
+  // Game night (Fort Frances Lakers on the SIJHL HockeyTech feed). Game timing is off unless all three HOCKEYTECH_* are set.
+  HOCKEYTECH_KEY: z.string().optional(),
+  HOCKEYTECH_CLIENT_CODE: z.string().optional(),
+  HOCKEYTECH_TEAM_ID: z.string().optional(),
+  GAME_SECONDS_PER_CLOCK_MINUTE: z.coerce.number().positive().default(105),
+  GAME_INTERMISSION_MINUTES: z.coerce.number().positive().default(18),
+  PREP_MINUTES: z.coerce.number().int().positive().default(8),
+  INTERMISSION_CAPACITY: z.coerce.number().int().positive().default(40),
+  ONE_TAP_MAX_CENTS: z.coerce.number().int().positive().default(6000),
 });
 
 export type Config = z.infer<typeof Env> & { hours: OrderingHours };
