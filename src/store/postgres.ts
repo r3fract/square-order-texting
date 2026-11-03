@@ -54,6 +54,7 @@ function toOrder(r: Row): OrderRecord {
     pickupSlot: r.pickup_slot,
     quotedReadyAt: r.quoted_ready_at,
     etaNotifiedAt: r.eta_notified_at,
+    loyaltyRewardId: r.loyalty_reward_id ?? null,
   };
 }
 
@@ -81,6 +82,7 @@ const ORDER_COLS: Record<keyof OrderRecord, string> = {
   pickupSlot: "pickup_slot",
   quotedReadyAt: "quoted_ready_at",
   etaNotifiedAt: "eta_notified_at",
+  loyaltyRewardId: "loyalty_reward_id",
 };
 
 /** jsonb columns need JSON text; everything else goes to pg as-is. */

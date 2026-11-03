@@ -22,6 +22,8 @@ export interface Consent {
   text: string;
   /** Id of the inbound text being handled (Twilio message SID). */
   turnId: string;
+  /** Arrival order of that text (assigned before it waits for the per-phone lock). */
+  seq: number;
 }
 
 /** Stable fingerprint of a cart, so a one-word "Y" only pays for exactly what was read back. */
@@ -245,6 +247,7 @@ export class OrderService {
       paymentLinkId: link.id,
       paymentLinkUrl: link.url,
       checkoutKind: "link",
+      loyaltyRewardId: null,
       invoiceId: null,
       invoiceVersion: null,
       squarePaymentId: null,
@@ -263,6 +266,7 @@ export class OrderService {
       readyAt: null,
     };
       await this.d.store.createOrder(record);
+      conv.pendingOneTap = null; // a link went out: a later "Y" must not also charge the card
       return { ok: true, order: record, quote };
     } catch (err) {
       // Never leave a payable link that we have no record of.
@@ -317,7 +321,8 @@ export class OrderService {
     const now = this.nowDate();
     if (await this.unconfirmedCardOrder(conv.phone)) return { ok: false, reason: OrderService.STILL_CONFIRMING };
     const p = conv.pendingOneTap;
-    if (p && (!AFFIRMATIVE.test(consent.text) || p.turnId === consent.turnId)) {
+    // Consent: a plain yes, in a text that arrived after the offer was actually sent (not one queued behind it).
+    if (p && (!AFFIRMATIVE.test(consent.text) || p.turnId === consent.turnId || p.shownAfterSeq == null || consent.seq <= p.shownAfterSeq)) {
       return { ok: false, reason: "Wait for them to reply Y to your offer before calling pay_with_saved_card." };
     }
     if (!p) {
@@ -327,10 +332,12 @@ export class OrderService {
       return { ok: false, reason: recent ? "That order is already paid." : "There's no one-word pay offer open. Read the order back first." };
     }
     if (p.cartHash !== cartHash(conv.cart)) {
+      await this.releaseReward(p.rewardId);
       conv.pendingOneTap = null;
       return { ok: false, reason: "The order changed since the offer. Call set_cart, read it back and offer again." };
     }
     if (now.getTime() - new Date(p.offeredAt).getTime() > ONE_TAP_WINDOW_MS) {
+      await this.releaseReward(p.rewardId);
       conv.pendingOneTap = null;
       return { ok: false, reason: "That offer expired. Call set_cart, read the order back and offer again." };
     }
@@ -356,11 +363,20 @@ export class OrderService {
     const problems = validateCart(menu, stock, conv.cart);
     if (problems.length) return { ok: false, reason: problems.map((x) => x.message).join(" ") };
 
-    await this.retireAwaiting(conv.phone, "replaced"); // no stray payable links next to a card payment
+    // An open link or invoice may already be paid on Square's page with its webhook still on the way.
+    const open = await this.d.store.getAwaitingOrderForPhone(conv.phone);
+    if (open && open.checkoutKind !== "card_on_file") {
+      if ((await this.cardChargeOutcome(open)) !== "unpaid") {
+        conv.pendingOneTap = null;
+        return { ok: false, reason: `Order #${open.orderNumber} looks already paid (or Square can't tell yet), so the card wasn't charged. It'll show as paid shortly.` };
+      }
+      await this.retire(open, "replaced");
+    }
 
     // A re-offer (total changed) already made the Square order: reuse it so a reward isn't attached twice.
     const recordId = p.recordId ?? randomUUID();
     const orderNumber = p.orderNumber ?? (await this.d.store.nextOrderNumber());
+    let rewardId = p.rewardId;
     const sqOrder = p.squareOrderId
       ? await this.d.square.retrieveOrder(p.squareOrderId)
       : await this.withReward(
@@ -378,6 +394,7 @@ export class OrderService {
             }),
           }),
           recordId,
+          (id) => (rewardId = id),
         );
     const quote = quoteFromOrder(sqOrder);
     if (quote.totalCents !== p.totalCents) {
@@ -389,6 +406,7 @@ export class OrderService {
         squareOrderId: sqOrder.id!,
         recordId,
         orderNumber,
+        ...(rewardId ? { rewardId } : {}),
       };
       return { ok: false, reason: `The total is now ${formatMoney(quote.totalCents, quote.currency)}. Read that out and ask them to reply Y again to pay it.` };
     }
@@ -401,6 +419,7 @@ export class OrderService {
       paymentLinkId: null,
       paymentLinkUrl: null,
       checkoutKind: "card_on_file",
+      loyaltyRewardId: rewardId ?? null,
       invoiceId: null,
       invoiceVersion: null,
       squarePaymentId: null,
@@ -447,6 +466,8 @@ export class OrderService {
     }
     if (!payment || payment.status !== "COMPLETED") {
       await this.d.store.transitionOrder(record.id, ["awaiting_payment"], { status: "canceled" });
+      await this.releaseReward(rewardId); // the fallback link is full price: give their points back
+      conv.pendingRewardTierId = null;
       return { ok: false, reason: "The saved card was declined.", fallbackToLink: true };
     }
     await this.d.store.updateOrder(record.id, { squarePaymentId: payment.id });
@@ -477,15 +498,21 @@ export class OrderService {
   }
 
   /** If the customer asked to redeem a loyalty reward, attach it so Square applies the discount; returns the re-read order. */
-  private async withReward(conv: Conversation, order: SquareOrder, recordId: string): Promise<SquareOrder> {
+  private async withReward(conv: Conversation, order: SquareOrder, recordId: string, onReward: (id: string) => void = () => {}): Promise<SquareOrder> {
     if (!conv.pendingRewardTierId || !conv.loyaltyAccountId || !order.id) return order;
-    await this.d.square.createLoyaltyReward({
+    const reward = await this.d.square.createLoyaltyReward({
       accountId: conv.loyaltyAccountId,
       rewardTierId: conv.pendingRewardTierId,
       orderId: order.id,
       idempotencyKey: `reward:${recordId}`,
     });
+    onReward(reward.id);
     return this.d.square.retrieveOrder(order.id);
+  }
+
+  /** Releases a reward from an order that won't be paid, so the customer keeps their points. Best effort. */
+  private async releaseReward(rewardId: string | null | undefined) {
+    if (rewardId) await this.d.square.deleteLoyaltyReward(rewardId).catch(() => {});
   }
 
   /** Offer the save-my-card page once, to customers Square knows who have no saved card yet. */
@@ -515,6 +542,7 @@ export class OrderService {
 
     const recordId = randomUUID();
     const orderNumber = await this.d.store.nextOrderNumber();
+    let invoiceRewardId: string | null = null;
     const sqOrder = await this.withReward(
       conv,
       await this.d.square.createOrder({
@@ -530,6 +558,7 @@ export class OrderService {
         }),
       }),
       recordId,
+      (id) => (invoiceRewardId = id),
     );
     conv.pendingRewardTierId = null;
     const quote = quoteFromOrder(sqOrder);
@@ -545,6 +574,7 @@ export class OrderService {
         paymentLinkId: null,
         paymentLinkUrl: inv.public_url ?? null,
         checkoutKind: "invoice",
+        loyaltyRewardId: invoiceRewardId,
         invoiceId: inv.id,
         invoiceVersion: inv.version,
         squarePaymentId: null,
@@ -563,6 +593,7 @@ export class OrderService {
         readyAt: null,
       };
       await this.d.store.createOrder(record);
+      conv.pendingOneTap = null; // a page went out: a later "Y" must not also charge the card
       return { ok: true, order: record, quote };
     } catch (err) {
       await this.d.square.cancelInvoice(inv.id, inv.version).catch(() => {}); // never leave a payable page we have no record of
@@ -593,7 +624,10 @@ export class OrderService {
 
   /** Deletes the link first, then marks the order, only if it's still unpaid (a payment may land at the same moment). */
   async retire(order: OrderRecord, status: "replaced" | "expired" | "canceled"): Promise<OrderRecord | null> {
-    if (order.checkoutKind === "invoice" && order.invoiceId) await this.d.square.cancelInvoice(order.invoiceId, order.invoiceVersion ?? 0);
+    if (order.checkoutKind === "invoice" && order.invoiceId) {
+      await this.d.square.cancelInvoice(order.invoiceId, order.invoiceVersion ?? 0);
+      await this.releaseReward(order.loyaltyRewardId);
+    }
     else if (order.checkoutKind === "link" && order.paymentLinkId) await this.d.square.deletePaymentLink(order.paymentLinkId);
     // card_on_file: nothing payable to take down
     return this.d.store.transitionOrder(order.id, ["awaiting_payment"], { status });

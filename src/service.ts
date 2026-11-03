@@ -41,6 +41,8 @@ export class TextOrderService {
   /** Null when the HockeyTech settings aren't all set. */
   readonly game: GameService | null;
   private locks = new Map<string, Promise<unknown>>();
+  /** Arrival order of inbound texts, so consent can't come from a text queued before an offer was sent. */
+  private lastSeq = 0;
   /** Orders the owner was already told Square wouldn't move (one alert each). */
   private scheduleAlerted = new Set<string>();
   private now: () => Date;
@@ -184,13 +186,15 @@ export class TextOrderService {
   async handleInboundSms(msg: { from: string; body: string; messageSid: string }): Promise<void> {
     if (!(await this.d.store.claimEvent(`twilio:${msg.messageSid}`))) return;
     const from = normalizePhone(msg.from);
-    const paid = await this.withLock(from, () => this.processInbound(from, msg.body ?? "", msg.messageSid));
+    this.lastSeq = Math.max(this.lastSeq + 1, Date.now() * 1000);
+    const seq = this.lastSeq; // taken before waiting for the lock
+    const paid = await this.withLock(from, () => this.processInbound(from, msg.body ?? "", msg.messageSid, seq));
     // A saved card was charged during that turn. Marking it paid takes the same lock, so do it now it's released.
     if (paid) await this.markPaid(paid);
   }
 
   /** Returns the Square order id if a saved card was charged during this turn. */
-  private async processInbound(from: string, rawBody: string, messageSid: string): Promise<string | undefined> {
+  private async processInbound(from: string, rawBody: string, messageSid: string, seq: number): Promise<string | undefined> {
     const { config, store } = this.d;
     const { text: body, found: hadCard } = redactCardNumbers(rawBody.trim());
 
@@ -250,7 +254,8 @@ export class TextOrderService {
       timeZone: config.TIMEZONE,
       gameSummary: () => this.game?.describe(config.TIMEZONE) ?? "No game clock (feed not set up).",
       resolvePickup: (t) => this.resolve(t),
-      inbound: { text: body, turnId: messageSid },
+      inbound: { text: body, turnId: messageSid, seq },
+      onCharged: (order, summary) => (charged = { order, summary }),
       loyalty: this.loyalty,
       forgetCard: async (c) => {
         await this.d.square.disableCard(c.savedCard!.id);
@@ -263,6 +268,7 @@ export class TextOrderService {
 
     let reply: string;
     let paidSquareOrderId: string | undefined;
+    let charged: { order: OrderRecord; summary: string } | null = null;
     try {
       const modelInput = hadCard ? `${body}\n\n(System note: the customer texted what looked like a card number; it was removed. Remind them never to text card details.)` : body;
       const turn = await runAgentTurn(agentDeps, conv, modelInput);
@@ -270,13 +276,25 @@ export class TextOrderService {
       paidSquareOrderId = turn.paidSquareOrderId;
     } catch (err) {
       this.log("agent turn failed", err);
-      reply = "Sorry, something went wrong on our end. Please try again in a minute, or order at the window.";
+      const c = charged as { order: OrderRecord; summary: string } | null;
+      if (c) {
+        // The card was charged before the AI failed: never tell them to try again.
+        const card = conv.savedCard ? `${conv.savedCard.brand} ••${conv.savedCard.last4}` : "your saved card";
+        reply = `${c.summary}\n\nCharged to ${card}. Order #${c.order.orderNumber}.`;
+        paidSquareOrderId = c.order.squareOrderId;
+      } else {
+        reply = "Sorry, something went wrong on our end. Please try again in a minute, or order at the window.";
+      }
     }
     if (hadCard && !/card/i.test(reply)) {
       reply = `For your safety, please don't text card numbers. Pay only through the secure link.\n\n${reply}`;
     }
     await this.save(conv);
     await this.sendCustomer(from, reply);
+    if (conv.pendingOneTap?.turnId === messageSid) {
+      conv.pendingOneTap.shownAfterSeq = this.lastSeq; // texts that arrived before this send can't say Y to it
+      await this.save(conv);
+    }
     return paidSquareOrderId;
   }
 
@@ -512,7 +530,9 @@ export class TextOrderService {
   /** Kills unpaid links older than CART_EXPIRY_MINUTES, and every unpaid link once ordering is closed or paused. Call every minute. */
   async expireStaleLinks(): Promise<number> {
     const status = await this.orderingStatus();
-    if (!status.open) {
+    const paused = (await this.d.store.getSetting("paused")) === "true";
+    // Hours we couldn't load yet (Square hiccup after a restart) aren't "closed": don't cancel everyone's links.
+    if (!status.open && (paused || this.hoursService.isKnown())) {
       return this.retireAllUnpaid("Text ordering has closed, so your unpaid order was cancelled. Thanks for checking us out!");
     }
     const cutoff = new Date(this.now().getTime() - this.d.config.CART_EXPIRY_MINUTES * 60_000);

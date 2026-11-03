@@ -172,6 +172,18 @@ describe("game service", () => {
     expect(alerts).toHaveLength(1);
   });
 
+  it("a non-numeric period (OT, SO) is not trustworthy and alerts once", async () => {
+    const clock = { now: at("2026-11-08T22:40:00Z") };
+    const ot = parseScorebar(live({ GameStatus: "2", Intermission: "0", Period: "OT", GameClock: "03:00" }));
+    const { svc, alerts } = gameService({ fetchGames: async () => ot, clock });
+    await svc.tick();
+    clock.now = at("2026-11-08T22:40:30Z");
+    await svc.tick();
+    expect(svc.state()!.timeline!.trustworthy).toBe(false);
+    expect(svc.usable()).toBe(false);
+    expect(alerts).toHaveLength(1);
+  });
+
   it("remembers when an intermission started", async () => {
     const clock = { now: at("2026-11-08T20:50:00Z") };
     let feed = parseScorebar(live({ GameStatus: "2", Intermission: "1", Period: "1", GameClock: "00:00" }));

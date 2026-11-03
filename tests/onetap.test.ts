@@ -247,6 +247,61 @@ describe("one-word pay with a saved card", () => {
     expect((await t.store.getConversation(PHONE)).pendingOneTap).toBeNull();
   });
 
+  it("sending a link cancels the one-word offer (no card charge on top of a paid link)", async () => {
+    const t = setup();
+    t.model.push(tool("set_cart", LINES), tool("send_checkout_link"), say("Here's a link."));
+    await t.text("a poutine, send me a link");
+    expect((await t.store.getConversation(PHONE)).pendingOneTap).toBeNull();
+    t.model.push(tool("pay_with_saved_card"), say("?"));
+    await t.text("Y");
+    expect(t.square.payments).toHaveLength(0);
+  });
+
+  it("a link paid before its webhook arrives blocks the card charge", async () => {
+    const t = setup();
+    t.model.push(tool("set_cart", LINES), tool("send_checkout_link"), say("link"));
+    await t.text("poutine, link please");
+    const link = (await t.store.getAwaitingOrderForPhone(PHONE))!;
+    t.square.orders.get(link.squareOrderId)!.paid = true; // paid on Square's page; webhook not here yet
+    await offer(t); // a fresh one-word offer for the same cart
+    t.model.push(tool("pay_with_saved_card"), say("?"));
+    await t.text("Y");
+    expect(t.square.payments).toHaveLength(0);
+    expect(t.lastToolResult()).toContain("already paid");
+  });
+
+  it("a Y sent before the offer was shown doesn't count", async () => {
+    const t = setup();
+    t.model.push(tool("set_cart", LINES), say("A poutine. Pay with VISA ••1111? Reply Y."), tool("pay_with_saved_card"), say("?"));
+    await Promise.all([t.text("a poutine please"), t.text("Y")]); // the Y was queued behind the offer turn
+    expect(t.square.payments).toHaveLength(0);
+    t.model.push(tool("pay_with_saved_card"), say("Done"));
+    await t.text("Y");
+    expect(t.square.payments).toHaveLength(1);
+  });
+
+  it("code adds the offer line even if the AI forgets it", async () => {
+    const t = setup();
+    t.model.push(tool("set_cart", LINES), say("A poutine coming up. Is right away OK?"));
+    await t.text("a poutine please");
+    expect(t.sms.last(PHONE)).toContain("Total $10.17. Pay with VISA ••1111? Reply Y.");
+  });
+
+  it("if the AI fails after the card was charged, the customer is told it's paid", async () => {
+    const t = setup();
+    await offer(t);
+    t.model.push(tool("pay_with_saved_card"), () => {
+      throw new Error("529 overloaded");
+    });
+    await t.text("Y");
+    expect(t.square.payments).toHaveLength(1);
+    const texts = t.sms.to(PHONE);
+    expect(texts.at(-2)).toContain("Charged to VISA ••1111. Order #1.");
+    expect(texts.at(-2)).not.toContain("something went wrong");
+    expect(texts.at(-1)).toContain("Paid, thanks! Order #1.");
+    expect((await t.store.listOrders(1))[0]!.status).toBe("paid");
+  });
+
   it("two profiles on one phone never get one-word pay", async () => {
     const t = setup();
     t.square.customers.push({ id: "C2", given_name: "Other", phone_number: PHONE });

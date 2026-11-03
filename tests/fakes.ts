@@ -320,6 +320,10 @@ export class FakeSquare implements SquareApi {
       o.discount += this.rewardDiscountCents;
       o.version++;
     }
+    return { id: `R${++this.seq}` };
+  }
+  async deleteLoyaltyReward(id: string) {
+    this.calls.push(`deleteLoyaltyReward:${id}`);
   }
 }
 
@@ -403,6 +407,7 @@ export function orderFixture(over: Partial<OrderRecord> = {}): OrderRecord {
     pickupSlot: "asap",
     quotedReadyAt: null,
     etaNotifiedAt: null,
+    loyaltyRewardId: null,
     totalCents: 1000,
     currency: "CAD",
     summary: "s",

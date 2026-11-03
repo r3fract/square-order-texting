@@ -39,6 +39,11 @@ export class HoursService {
     private ttlMs = 15 * 60_000,
   ) {}
 
+  /** True once hours have been read (from the override or Square at least once). */
+  isKnown(): boolean {
+    return !!this.override || this.cached !== null;
+  }
+
   /** Last known hours without calling Square (for synchronous checks). */
   peek(): OrderingHours {
     return this.override ?? this.lastGood;

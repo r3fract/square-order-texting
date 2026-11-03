@@ -24,7 +24,9 @@ export function estimateTimeline(
   const none: Timeline = { gameId: g.id, intermissionStarts: { 1: null, 2: null }, gameEnd: null, trustworthy: false };
   const t = (ms: number) => new Date(ms);
 
-  if (g.status === "unknown" || g.status === "final" || g.period >= 4) return none;
+  if (g.status === "unknown" || g.status === "final") return none;
+  // Overtime, shootouts and anything that isn't period 1-3 ("OT", "SO" parse as 0): not trustworthy.
+  if (g.status !== "scheduled" && (g.period < 1 || g.period > 3)) return none;
 
   if (g.status === "scheduled") {
     const e1 = g.startsAt.getTime() + P;

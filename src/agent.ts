@@ -176,7 +176,9 @@ export interface AgentDeps {
   /** Disables the customer's saved card in Square. */
   forgetCard: (conv: Conversation) => Promise<void>;
   /** The customer's own text this turn and when it arrived: charging checks consent against these, not the AI. */
-  inbound: { text: string; turnId: string };
+  inbound: { text: string; turnId: string; seq: number };
+  /** Told the moment a saved card is charged, so the service can confirm it even if the AI fails afterwards. */
+  onCharged?: (order: OrderRecord, summary: string) => void;
 }
 
 export interface AgentTurnResult {
@@ -246,7 +248,7 @@ How to write:
 How to take an order:
 1. As soon as you understand items, call set_cart with the full cart (it replaces the old cart). Fix any problems it returns.
 2. Once the items are settled, send ONE message that reads the order back with Square's total and asks for whatever is still missing, together: their name (if you don't have it) and pickup time (if they haven't said; "right away" is the default). Example: "Got it: a croissant and a small latte, $8.75. What name should I put on it, and is right away OK for pickup?" Save answers with set_pickup_details.
-3. When they answer with a name, a time or "yes" and don't change the items, that is their confirmation: call send_checkout_link in the same turn. Don't ask "want me to send the link?" again. The summary and link are appended for you; just add a short line like "Thanks Riley, here's your order."
+3. When they answer with a name, a time or "yes" and don't change the items, that is their confirmation: call send_checkout_link in the same turn (unless set_cart offered one-word pay: then a Y means pay_with_saved_card, and you don't send a link). Don't ask "want me to send the link?" again. The summary and link are appended for you; just add a short line like "Thanks Riley, here's your order."
 4. Changes after a link was sent: call set_cart again, then send_checkout_link again. The old link stops working automatically.
 5. The kitchen starts only after payment. You'll never confirm an order as placed yourself; the system texts them when payment lands.
 6. For questions about an existing order, go by the order status list below, not your memory of the chat. If an order is "ready for pickup", say so. Only say it's being made if it says "paid, being made". If they say they already picked it up, take their word for it.
@@ -390,6 +392,11 @@ export async function runAgentTurn(deps: AgentDeps, conv: Conversation, customer
     if (declinedFirst) reply = `That card didn't go through, so here's a secure link instead.\n\n${reply}`;
   }
   if (!reply) reply = "Sorry, I missed that. What can I get you?";
+  // The one-word-pay question the customer answers "Y" to is written by code, so the card and total are always shown.
+  const p = conv.pendingOneTap;
+  if (!checkout && p && p.turnId === deps.inbound.turnId && conv.savedCard && !/Reply Y\b/i.test(reply)) {
+    reply = `${reply}\n\nTotal ${formatMoney(p.totalCents)}. Pay with ${conv.savedCard.brand} ••${conv.savedCard.last4}? Reply Y.`;
+  }
   return { reply, checkout, ...(paidSquareOrderId ? { paidSquareOrderId } : {}) };
 }
 
@@ -480,8 +487,9 @@ async function runTool(
       };
     }
     case "pay_with_saved_card": {
-      const r = await deps.orders.payWithSavedCard(conv, { text: deps.inbound.text, turnId: deps.inbound.turnId });
+      const r = await deps.orders.payWithSavedCard(conv, { text: deps.inbound.text, turnId: deps.inbound.turnId, seq: deps.inbound.seq });
       if (r.ok) {
+        deps.onCharged?.(r.order, r.quote.text);
         return {
           result: `Paid with the saved card: order #${r.order.orderNumber}, total ${formatMoney(r.order.totalCents, r.order.currency)}. The summary is appended for you; just say thanks.`,
           checkout: { order: r.order, summary: r.quote.text },

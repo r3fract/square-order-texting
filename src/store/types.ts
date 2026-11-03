@@ -28,6 +28,10 @@ export interface PendingOneTap {
   squareOrderId?: string;
   recordId?: string;
   orderNumber?: number;
+  /** Loyalty reward attached to that reused Square order (released if the offer is abandoned). */
+  rewardId?: string;
+  /** Arrival sequence of the newest inbound text when the offer was sent: only a later text can say Y to it. */
+  shownAfterSeq?: number;
 }
 
 /** A message in the model conversation, stored as Anthropic message params. */
@@ -74,6 +78,8 @@ export interface OrderRecord {
   pickupSlot: string | null; // "asap", "clock", "game:<id>:int1|int2|end"
   quotedReadyAt: Date | null;
   etaNotifiedAt: Date | null;
+  /** Square Loyalty reward attached to this order (released if the order is abandoned). */
+  loyaltyRewardId: string | null;
   totalCents: number;
   currency: string;
   summary: string;

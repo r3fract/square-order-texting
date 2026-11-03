@@ -86,6 +86,25 @@ describe("hours from Square", () => {
     expect(sms.last("+18075551234")).toBe("Sorry, we're closed.");
   });
 
+  it("a Square outage right after startup doesn't cancel everyone's links", async () => {
+    const square = new FakeSquare();
+    square.businessHours = MON_FRI_9_5;
+    const store = new MemoryStore();
+    const sms = new FakeSms();
+    let clock = new Date("2026-11-03T16:00:00Z"); // Tue 11am Toronto: open
+    const model = new ScriptedModel([tool("set_cart", { lines: [{ variation_id: "V_POUTINE", quantity: 1 }] }), tool("send_checkout_link"), say("link")]);
+    const make = () =>
+      new TextOrderService({ config: testConfig({ ORDERING_HOURS: "" }), store, square, sms, model, now: () => clock, log: () => {} });
+    await make().handleInboundSms({ from: "+18075551234", body: "poutine", messageSid: "SMh9" });
+    expect(square.links.size).toBe(1);
+    // restart; Square's location API is down for a moment
+    const restarted = make();
+    square.failNext.retrieveLocation = new Error("Square down");
+    clock = new Date("2026-11-03T16:01:00Z");
+    await restarted.expireStaleLinks();
+    expect([...square.links.values()][0]!.deleted).toBe(false);
+  });
+
   it("with no hours anywhere, ordering is closed", async () => {
     const square = new FakeSquare(); // no business hours
     const model = new ScriptedModel([say("Sorry.")]);

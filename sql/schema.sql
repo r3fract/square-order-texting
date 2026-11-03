@@ -70,3 +70,4 @@ ALTER TABLE orders ADD COLUMN IF NOT EXISTS eta_notified_at timestamptz;
 CREATE INDEX IF NOT EXISTS orders_slot ON orders (pickup_slot, status);
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS loyalty_balance integer;
 ALTER TABLE conversations ADD COLUMN IF NOT EXISTS pending_reward_tier_id text;
+ALTER TABLE orders ADD COLUMN IF NOT EXISTS loyalty_reward_id text;

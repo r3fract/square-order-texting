@@ -111,6 +111,28 @@ describe("Square Loyalty", () => {
     expect((await t.store.getConversation(PHONE)).pendingRewardTierId).toBeNull();
   });
 
+  it("a declined card releases the reward before falling back to a link", async () => {
+    const t = setup({ member: true, card: true });
+    t.square.cards.set("C1", [{ id: "ccof:decline", card_brand: "VISA", last_4: "1111", enabled: true }]);
+    t.model.push(tool("redeem_reward", { tier_id: "T1" }), tool("set_cart", ORDER), say("Pay with VISA ••1111? Reply Y."));
+    await t.text("use my reward, 2 poutines and large fries");
+    t.model.push(tool("pay_with_saved_card"), say("Sorry."));
+    await t.text("Y");
+    expect(t.square.calls.filter((c) => c.startsWith("deleteLoyaltyReward"))).toHaveLength(t.square.rewards.length);
+    expect(t.sms.last(PHONE)).toContain("https://square.link/u/");
+    expect((await t.store.getConversation(PHONE)).pendingRewardTierId).toBeNull();
+  });
+
+  it("an expired save-card page releases its reward", async () => {
+    const t = setup({ member: true });
+    t.model.push(tool("redeem_reward", { tier_id: "T1" }), tool("set_cart", ORDER), tool("send_card_save_page"), say("page"));
+    await t.text("use my reward, send the save-card page");
+    expect(t.square.rewards).toHaveLength(1);
+    t.advance(21 * 60_000);
+    await t.service.expireStaleLinks();
+    expect(t.square.calls.filter((c) => c.startsWith("deleteLoyaltyReward"))).toHaveLength(1);
+  });
+
   it("rewards aren't redeemed on a plain payment link", async () => {
     const t = setup({ member: true });
     t.model.push(tool("redeem_reward", { tier_id: "T1" }), tool("set_cart", ORDER), tool("send_checkout_link"), say("hmm"));

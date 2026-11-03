@@ -38,7 +38,7 @@ describe.skipIf(!url)("Postgres store", () => {
       totalCents: 3334, currency: "CAD", summary: "s", status: "awaiting_payment",
       createdAt: new Date("2026-11-03T23:00:00Z"), paidAt: null, readyAt: null,
       checkoutKind: "link", invoiceId: null, invoiceVersion: null, squarePaymentId: null, customerId: null, cart: [],
-      pickupAt: null, pickupSlot: "asap", quotedReadyAt: null, etaNotifiedAt: null,
+      pickupAt: null, pickupSlot: "asap", quotedReadyAt: null, etaNotifiedAt: null, loyaltyRewardId: null,
     });
     expect((await store.getAwaitingOrderForPhone(phone))!.id).toBe(id);
     expect((await store.listAwaitingCreatedBefore(new Date("2026-11-03T23:30:00Z"))).some((o) => o.id === id)).toBe(true);

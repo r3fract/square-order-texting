@@ -133,8 +133,9 @@ export class GameService {
       intermissionStartedAt,
       alertedGameId: prev?.game?.id === game?.id ? (prev?.alertedGameId ?? null) : null,
     };
-    if (game && game.status === "unknown") {
-      await this.alertOnce("⚠️ The Lakers game clock shows a state I don't recognize, so intermission pickups are off for now.");
+    const live = game && (game.status === "in_progress" || game.status === "intermission" || game.status === "unknown");
+    if (live && !timeline?.trustworthy) {
+      await this.alertOnce("⚠️ The Lakers game clock shows overtime or a state I don't recognize, so intermission pickups are off for now.");
     }
     await this.persist();
 

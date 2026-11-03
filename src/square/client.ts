@@ -174,7 +174,9 @@ export interface SquareApi {
   retrieveLoyaltyProgram(): Promise<LoyaltyProgram | null>;
   searchLoyaltyAccount(customerId: string): Promise<LoyaltyAccount | null>;
   accumulateLoyalty(a: { accountId: string; orderId: string; locationId: string; idempotencyKey: string }): Promise<void>;
-  createLoyaltyReward(a: { accountId: string; rewardTierId: string; orderId: string; idempotencyKey: string }): Promise<void>;
+  createLoyaltyReward(a: { accountId: string; rewardTierId: string; orderId: string; idempotencyKey: string }): Promise<{ id: string }>;
+  /** Releases a reward (and its points) from an order that won't be paid. */
+  deleteLoyaltyReward(id: string): Promise<void>;
 }
 
 export class SquareError extends Error {
@@ -409,10 +411,20 @@ export function createSquareClient(opts: {
     },
 
     async createLoyaltyReward({ accountId, rewardTierId, orderId, idempotencyKey }) {
-      await call("POST", "/v2/loyalty/rewards", {
+      const res = await call<{ reward: { id: string } }>("POST", "/v2/loyalty/rewards", {
         reward: { loyalty_account_id: accountId, reward_tier_id: rewardTierId, order_id: orderId },
         idempotency_key: idempotencyKey,
       });
+      return { id: res.reward.id };
+    },
+
+    async deleteLoyaltyReward(id) {
+      try {
+        await call("DELETE", `/v2/loyalty/rewards/${enc(id)}`);
+      } catch (e) {
+        if (e instanceof SquareError && e.status === 404) return;
+        throw e;
+      }
     },
   };
 }
