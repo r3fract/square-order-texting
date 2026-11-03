@@ -35,6 +35,8 @@ function storeSuite(name: string, make: () => Promise<Store>, done?: (s: Store) 
       conv.cardOfferMadeAt = new Date("2026-11-03T20:02:00Z");
       conv.pickupTarget = { kind: "intermission", n: 2 };
       conv.loyaltyAccountId = "LA1";
+      conv.loyaltyBalance = 12;
+      conv.pendingRewardTierId = "T1";
       conv.updatedAt = new Date("2026-11-03T20:03:00Z");
       await store.saveConversation(conv);
       expect(await store.getConversation(phone)).toEqual(conv);

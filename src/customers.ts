@@ -53,6 +53,7 @@ export class CustomerService {
       conv.savedCard = card ? { id: card.id, brand: card.card_brand ?? "Card", last4: card.last_4 ?? "????" } : null;
       const account = await this.square.searchLoyaltyAccount(best.id).catch(() => null);
       conv.loyaltyAccountId = account?.id ?? null;
+      conv.loyaltyBalance = account?.balance ?? null;
     } catch (err) {
       this.log(`customer lookup failed for ${conv.phone}`, err);
     }

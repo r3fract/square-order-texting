@@ -24,6 +24,10 @@ export interface PendingOneTap {
   offeredAt: Date;
   /** The inbound text the offer was made in reply to: a Y has to come in a later text. */
   turnId?: string;
+  /** Set when a Square order already exists for this offer (e.g. a reward changed the total): reuse it, don't make another. */
+  squareOrderId?: string;
+  recordId?: string;
+  orderNumber?: number;
 }
 
 /** A message in the model conversation, stored as Anthropic message params. */
@@ -46,6 +50,9 @@ export interface Conversation {
   cardOfferMadeAt: Date | null;
   pickupTarget: PickupTarget | null;
   loyaltyAccountId: string | null;
+  loyaltyBalance: number | null;
+  /** Reward tier the customer asked to use on this order (card-on-file or save-card page only). */
+  pendingRewardTierId: string | null;
 }
 
 export type OrderStatus = "awaiting_payment" | "paid" | "ready" | "picked_up" | "expired" | "replaced" | "canceled";
@@ -123,5 +130,7 @@ export function newConversation(phone: string): Conversation {
     cardOfferMadeAt: null,
     pickupTarget: null,
     loyaltyAccountId: null,
+    loyaltyBalance: null,
+    pendingRewardTierId: null,
   };
 }

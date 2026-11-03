@@ -347,23 +347,38 @@ export class OrderService {
 
     await this.retireAwaiting(conv.phone, "replaced"); // no stray payable links next to a card payment
 
-    const recordId = randomUUID();
-    const orderNumber = await this.d.store.nextOrderNumber();
-    const sqOrder = await this.d.square.createOrder({
-      idempotencyKey: `order:${recordId}`,
-      order: buildSquareOrder({
-        locationId: this.d.locationId,
-        cart: conv.cart,
-        conv,
-        orderNumber,
-        pickupAt: pickup.pickupAt,
-        pickupLabel: pickup.label,
-        ...(pickup.pickupAt ? { pickupPrepMinutes: this.d.prepMinutes } : {}),
-      }),
-    });
+    // A re-offer (total changed) already made the Square order: reuse it so a reward isn't attached twice.
+    const recordId = p.recordId ?? randomUUID();
+    const orderNumber = p.orderNumber ?? (await this.d.store.nextOrderNumber());
+    const sqOrder = p.squareOrderId
+      ? await this.d.square.retrieveOrder(p.squareOrderId)
+      : await this.withReward(
+          conv,
+          await this.d.square.createOrder({
+            idempotencyKey: `order:${recordId}`,
+            order: buildSquareOrder({
+              locationId: this.d.locationId,
+              cart: conv.cart,
+              conv,
+              orderNumber,
+              pickupAt: pickup.pickupAt,
+              pickupLabel: pickup.label,
+              ...(pickup.pickupAt ? { pickupPrepMinutes: this.d.prepMinutes } : {}),
+            }),
+          }),
+          recordId,
+        );
     const quote = quoteFromOrder(sqOrder);
     if (quote.totalCents !== p.totalCents) {
-      conv.pendingOneTap = { cartHash: p.cartHash, totalCents: quote.totalCents, offeredAt: now, turnId: consent.turnId };
+      conv.pendingOneTap = {
+        cartHash: p.cartHash,
+        totalCents: quote.totalCents,
+        offeredAt: now,
+        turnId: consent.turnId,
+        squareOrderId: sqOrder.id!,
+        recordId,
+        orderNumber,
+      };
       return { ok: false, reason: `The total is now ${formatMoney(quote.totalCents, quote.currency)}. Read that out and ask them to reply Y again to pay it.` };
     }
 
@@ -425,6 +440,7 @@ export class OrderService {
     }
     await this.d.store.updateOrder(record.id, { squarePaymentId: payment.id });
     record.squarePaymentId = payment.id;
+    conv.pendingRewardTierId = null;
     return { ok: true, order: record, quote };
   }
 
@@ -447,6 +463,18 @@ export class OrderService {
       return "The kitchen is at its limit for text orders right now. Try again in a few minutes, or order at the window.";
     }
     return null;
+  }
+
+  /** If the customer asked to redeem a loyalty reward, attach it so Square applies the discount; returns the re-read order. */
+  private async withReward(conv: Conversation, order: SquareOrder, recordId: string): Promise<SquareOrder> {
+    if (!conv.pendingRewardTierId || !conv.loyaltyAccountId || !order.id) return order;
+    await this.d.square.createLoyaltyReward({
+      accountId: conv.loyaltyAccountId,
+      rewardTierId: conv.pendingRewardTierId,
+      orderId: order.id,
+      idempotencyKey: `reward:${recordId}`,
+    });
+    return this.d.square.retrieveOrder(order.id);
   }
 
   /** Offer the save-my-card page once, to customers Square knows who have no saved card yet. */
@@ -475,18 +503,23 @@ export class OrderService {
 
     const recordId = randomUUID();
     const orderNumber = await this.d.store.nextOrderNumber();
-    const sqOrder = await this.d.square.createOrder({
-      idempotencyKey: `order:${recordId}`,
-      order: buildSquareOrder({
-        locationId: this.d.locationId,
-        cart: conv.cart,
-        conv,
-        orderNumber,
-        pickupAt: pickup.pickupAt,
-        pickupLabel: pickup.label,
-        ...(pickup.pickupAt ? { pickupPrepMinutes: this.d.prepMinutes } : {}),
+    const sqOrder = await this.withReward(
+      conv,
+      await this.d.square.createOrder({
+        idempotencyKey: `order:${recordId}`,
+        order: buildSquareOrder({
+          locationId: this.d.locationId,
+          cart: conv.cart,
+          conv,
+          orderNumber,
+          pickupAt: pickup.pickupAt,
+          pickupLabel: pickup.label,
+          ...(pickup.pickupAt ? { pickupPrepMinutes: this.d.prepMinutes } : {}),
+        }),
       }),
-    });
+      recordId,
+    );
+    conv.pendingRewardTierId = null;
     const quote = quoteFromOrder(sqOrder);
     const dueDate = this.nowDate().toLocaleDateString("en-CA", { timeZone: this.d.timeZone });
     const draft = await this.d.square.createInvoice({ idempotencyKey: `invoice:${recordId}`, orderId: sqOrder.id!, customerId, locationId: this.d.locationId, dueDate });

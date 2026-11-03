@@ -6,6 +6,7 @@ import { fetchScorebar, type FeedGame } from "./game/hockeytech.js";
 import { GameService, ordinal } from "./game/service.js";
 import type { Timeline } from "./game/timeline.js";
 import { HoursService } from "./hours.js";
+import { LoyaltyService } from "./loyalty.js";
 import { resolvePickup, shortTime, type ResolvedPickup } from "./pickup.js";
 import { reconcileSchedule } from "./schedule.js";
 import { OrderService } from "./orders.js";
@@ -36,6 +37,7 @@ export class TextOrderService {
   readonly orders: OrderService;
   readonly hoursService: HoursService;
   readonly customers: CustomerService;
+  readonly loyalty: LoyaltyService;
   /** Null when the HockeyTech settings aren't all set. */
   readonly game: GameService | null;
   private locks = new Map<string, Promise<unknown>>();
@@ -50,6 +52,7 @@ export class TextOrderService {
     this.menus = new MenuService(d.square, d.config.SQUARE_LOCATION_ID);
     this.hoursService = new HoursService(d.square, d.config.hours);
     this.customers = new CustomerService(d.square, () => this.now(), (m, e) => this.log(m, e));
+    this.loyalty = new LoyaltyService(d.square, d.config.SQUARE_LOCATION_ID, (m, e) => this.log(m, e));
     const { HOCKEYTECH_KEY: key, HOCKEYTECH_CLIENT_CODE: clientCode, HOCKEYTECH_TEAM_ID: teamId } = d.config;
     this.game =
       d.fetchGames || (key && clientCode && teamId)
@@ -248,6 +251,7 @@ export class TextOrderService {
       gameSummary: () => this.game?.describe(config.TIMEZONE) ?? "No game clock (feed not set up).",
       resolvePickup: (t) => this.resolve(t),
       inbound: { text: body, turnId: messageSid },
+      loyalty: this.loyalty,
       forgetCard: async (c) => {
         await this.d.square.disableCard(c.savedCard!.id);
         c.savedCard = null;
@@ -461,6 +465,10 @@ export class TextOrderService {
     const found = await this.d.store.getOrderBySquareId(squareOrderId);
     if (!found) return;
     const order = await this.d.store.transitionOrder(found.id, ["paid", "ready"], { status: "picked_up" });
+    if (order) {
+      const conv = await this.d.store.getConversation(order.phone);
+      if (conv.loyaltyAccountId && order.customerId) await this.loyalty.accumulate(order, conv.loyaltyAccountId); // members only, at pickup
+    }
     if (order) await this.noteInChat(order.phone, `(system: staff marked order #${order.orderNumber} as picked up)`, `Order #${order.orderNumber} picked up.`);
   }
 

@@ -24,6 +24,8 @@ function toConversation(r: Row): Conversation {
     cardOfferMadeAt: r.card_offer_made_at ?? null,
     pickupTarget: r.pickup_target ?? null,
     loyaltyAccountId: r.loyalty_account_id ?? null,
+    loyaltyBalance: r.loyalty_balance ?? null,
+    pendingRewardTierId: r.pending_reward_tier_id ?? null,
   };
 }
 
@@ -123,12 +125,15 @@ export class PostgresStore implements Store {
   async saveConversation(c: Conversation) {
     await this.pool.query(
       `INSERT INTO conversations (phone, customer_name, messages, cart, pickup_note, human_until, opted_out, updated_at,
-         square_customer_id, customer_ambiguous, customer_lookup_at, saved_card, pending_one_tap, card_offer_made_at, pickup_target, loyalty_account_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+         square_customer_id, customer_ambiguous, customer_lookup_at, saved_card, pending_one_tap, card_offer_made_at, pickup_target, loyalty_account_id,
+         loyalty_balance, pending_reward_tier_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
        ON CONFLICT (phone) DO UPDATE SET customer_name=$2, messages=$3, cart=$4, pickup_note=$5, human_until=$6, opted_out=$7, updated_at=$8,
-         square_customer_id=$9, customer_ambiguous=$10, customer_lookup_at=$11, saved_card=$12, pending_one_tap=$13, card_offer_made_at=$14, pickup_target=$15, loyalty_account_id=$16`,
+         square_customer_id=$9, customer_ambiguous=$10, customer_lookup_at=$11, saved_card=$12, pending_one_tap=$13, card_offer_made_at=$14, pickup_target=$15, loyalty_account_id=$16,
+         loyalty_balance=$17, pending_reward_tier_id=$18`,
       [c.phone, c.customerName, JSON.stringify(c.messages), JSON.stringify(c.cart), c.pickupNote, c.humanUntil, c.optedOut, c.updatedAt,
-       c.squareCustomerId, c.customerAmbiguous, c.customerLookupAt, json(c.savedCard), json(c.pendingOneTap), c.cardOfferMadeAt, json(c.pickupTarget), c.loyaltyAccountId],
+       c.squareCustomerId, c.customerAmbiguous, c.customerLookupAt, json(c.savedCard), json(c.pendingOneTap), c.cardOfferMadeAt, json(c.pickupTarget), c.loyaltyAccountId,
+       c.loyaltyBalance, c.pendingRewardTierId],
     );
   }
 

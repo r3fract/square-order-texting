@@ -108,6 +108,16 @@ export const TOOLS: ModelRequest["tools"] = [
     input_schema: { type: "object", properties: {} },
   },
   {
+    name: "reorder_last",
+    description: "Load the customer's last paid order into the cart ('the usual', 'same as last time'). Returns Square's pricing and any problems, like set_cart.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "redeem_reward",
+    description: "Use a Square Loyalty reward on this order (only the tier the prompt says they can redeem). Works with one-word pay or the save-card page, not a plain link.",
+    input_schema: { type: "object", properties: { tier_id: { type: "string" } }, required: ["tier_id"] },
+  },
+  {
     name: "send_card_save_page",
     description:
       "Instead of send_checkout_link, when the customer said yes to one-word ordering next time: sends a Square page where they pay and can tick 'Save my card on file'.",
@@ -161,6 +171,8 @@ export interface AgentDeps {
   gameSummary: () => string;
   /** Resolves a pickup target against the live game clock. */
   resolvePickup: (t: PickupTarget) => ResolvedPickup;
+  /** Square Loyalty (null when the seller doesn't use it). */
+  loyalty: { affordableTier: (balance: number) => Promise<{ id: string; name: string; points: number } | null> } | null;
   /** Disables the customer's saved card in Square. */
   forgetCard: (conv: Conversation) => Promise<void>;
   /** The customer's own text this turn and when it arrived: charging checks consent against these, not the AI. */
@@ -209,6 +221,11 @@ export async function buildSystemPrompt(deps: AgentDeps, conv: Conversation): Pr
   const now = (deps.now ?? (() => new Date()))();
   const localNow = now.toLocaleString("en-CA", { timeZone: deps.timeZone, weekday: "long", hour: "numeric", minute: "2-digit" });
   const recentOrders = await recentOrdersText(deps.store, conv.phone);
+  const tier = conv.loyaltyAccountId && conv.loyaltyBalance != null && deps.loyalty ? await deps.loyalty.affordableTier(conv.loyaltyBalance) : null;
+  const loyaltyLine =
+    conv.loyaltyAccountId && conv.loyaltyBalance != null
+      ? `\nLoyalty: ${conv.loyaltyBalance} points${tier ? `; can redeem: ${tier.name} (tier ${tier.id})\nMention an available reward once per chat.` : ""}`
+      : "";
   const nameOf = (id: string) => {
     const hit = menu.byVariation.get(id);
     return hit ? (hit.item.variations.length > 1 ? `${hit.item.name} (${hit.variation.name})` : hit.item.name) : id;
@@ -244,7 +261,7 @@ Right now: ${localNow}. ${status.message}
 
 Customer: ${conv.customerName ? JSON.stringify(conv.customerName) : "(name not given yet)"} · phone ${conv.phone}
 ${customerPromptLine(conv)}
-Greet known customers by first name once per chat.
+Greet known customers by first name once per chat.${loyaltyLine}
 Pickup note: ${conv.pickupNote ?? "(none)"}
 This customer's text orders, current status (trust this over anything said earlier in the chat):
 ${recentOrders}
@@ -376,6 +393,25 @@ export async function runAgentTurn(deps: AgentDeps, conv: Conversation, customer
   return { reply, checkout, ...(paidSquareOrderId ? { paidSquareOrderId } : {}) };
 }
 
+
+/** Prices the cart with Square and opens a one-word-pay or save-card offer when the customer qualifies. */
+async function cartResult(deps: AgentDeps, conv: Conversation): Promise<string> {
+  if (conv.cart.length === 0) return "Cart is now empty.";
+  const q = await deps.orders.quote(conv);
+  if (!q.ok) {
+    conv.pendingOneTap = null;
+    return `Cart saved but has problems. Fix or ask the customer:\n${q.problems.join("\n")}`;
+  }
+  let offer = (await deps.orders.offerOneTap(conv, q.quote.totalCents, deps.inbound.turnId))
+    ? `\nOffer one-word pay: end your read-back with "Pay with ${conv.savedCard!.brand} ••${conv.savedCard!.last4}? Reply Y." Don't send a link unless they ask.`
+    : "";
+  if (!offer && deps.orders.shouldOfferCardSave(conv)) {
+    conv.cardOfferMadeAt = (deps.now ?? (() => new Date()))();
+    offer = `\nOnce, offer: "Want one-word ordering next time? I can send a Square page where you tick 'save my card'." If yes, call send_card_save_page instead of send_checkout_link.`;
+  }
+  return `Cart saved. Square's pricing:\n${q.quote.text}${offer}`;
+}
+
 async function runTool(
   deps: AgentDeps,
   conv: Conversation,
@@ -383,6 +419,19 @@ async function runTool(
   input: unknown,
 ): Promise<{ result: string; checkout?: { order: OrderRecord; summary: string; declinedFirst?: boolean } }> {
   switch (name) {
+    case "reorder_last": {
+      const last = await deps.store.lastPaidOrderForPhone(conv.phone);
+      if (!last || last.cart.length === 0) return { result: "No earlier order found." };
+      conv.cart = last.cart.map((l) => ({ ...l, modifierIds: [...l.modifierIds] }));
+      return { result: `Loaded their last order.\n${await cartResult(deps, conv)}` };
+    }
+    case "redeem_reward": {
+      const { tier_id } = z.object({ tier_id: z.string() }).parse(input);
+      const tier = conv.loyaltyAccountId && conv.loyaltyBalance != null && deps.loyalty ? await deps.loyalty.affordableTier(conv.loyaltyBalance) : null;
+      if (!tier || tier.id !== tier_id) return { result: "That reward isn't available for this customer right now." };
+      conv.pendingRewardTierId = tier.id;
+      return { result: `${tier.name} will be applied by Square when they pay with their saved card or the save-card page. Square's total will include it.` };
+    }
     case "set_cart": {
       const parsed = SetCartInput.parse(input);
       conv.cart = parsed.lines.map<CartLine>((l) => ({
@@ -391,20 +440,7 @@ async function runTool(
         modifierIds: l.modifier_ids,
         ...(l.note ? { note: l.note } : {}),
       }));
-      if (conv.cart.length === 0) return { result: "Cart is now empty." };
-      const q = await deps.orders.quote(conv);
-      if (!q.ok) {
-        conv.pendingOneTap = null;
-        return { result: `Cart saved but has problems. Fix or ask the customer:\n${q.problems.join("\n")}` };
-      }
-      let offer = (await deps.orders.offerOneTap(conv, q.quote.totalCents, deps.inbound.turnId))
-        ? `\nOffer one-word pay: end your read-back with "Pay with ${conv.savedCard!.brand} ••${conv.savedCard!.last4}? Reply Y." Don't send a link unless they ask.`
-        : "";
-      if (!offer && deps.orders.shouldOfferCardSave(conv)) {
-        conv.cardOfferMadeAt = (deps.now ?? (() => new Date()))();
-        offer = `\nOnce, offer: "Want one-word ordering next time? I can send a Square page where you tick 'save my card'." If yes, call send_card_save_page instead of send_checkout_link.`;
-      }
-      return { result: `Cart saved. Square's pricing:\n${q.quote.text}${offer}` };
+      return { result: await cartResult(deps, conv) };
     }
     case "set_pickup_details": {
       const p = PickupInput.parse(input);
@@ -424,6 +460,9 @@ async function runTool(
     }
     case "send_checkout_link": {
       if (conv.cart.length === 0) return { result: "Can't send a link: the cart is empty." };
+      if (conv.pendingRewardTierId) {
+        return { result: "Rewards work with a saved card or the save-card page. Use pay_with_saved_card or send_card_save_page, or drop the reward." };
+      }
       const r = await deps.orders.checkout(conv);
       if (!r.ok) return { result: `Link not created. Tell the customer: ${r.reason}` };
       return {
