@@ -162,3 +162,7 @@ Code map: `src/agent.ts` (prompt + tools), `src/orders.ts` (cart rules, Square o
 - **Multi-tenant**: one Twilio number per location → per-location config, to fold into the Square platform.
 - **Platform fee**: adding `app_fee_money` to payment links hides Apple Pay on Square's hosted page, so charge clients a subscription instead, or move to your own checkout page with the Web Payments SDK.
 - **Scheduled pickup times**: currently ASAP with a free-text pickup note ("after 2nd period").
+
+## License
+
+MIT. See [LICENSE](LICENSE).

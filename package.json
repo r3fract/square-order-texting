@@ -5,7 +5,9 @@
   "description": "Customers text an order in plain language; an AI builds it against your Square catalog and texts back a Square checkout link (Apple Pay, Google Pay, card).",
   "type": "module",
   "main": "dist/index.js",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json",
@@ -28,5 +30,6 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "vitest": "^5.1.0"
-  }
+  },
+  "license": "MIT"
 }
