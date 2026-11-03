@@ -1,9 +1,16 @@
-import type { SquareApi, SquareCustomer } from "./square/client.js";
+import type { SquareApi } from "./square/client.js";
 import type { Conversation } from "./store/types.js";
 
 const LOOKUP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
-const newest = (cs: SquareCustomer[]) => [...cs].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""))[0];
+/**
+ * Names come from outside (Square profiles, customers' texts) and end up in the AI's instructions.
+ * Keep letters, spaces, hyphens and apostrophes only, max 40 characters, so a name can't carry instructions.
+ */
+export function cleanName(raw: string | null | undefined): string | null {
+  const s = (raw ?? "").replace(/[^\p{L}\p{M}' -]+/gu, " ").replace(/\s+/g, " ").trim().slice(0, 40).trim();
+  return s || null;
+}
 
 /** Matches a texting phone number to the seller's Square Customer Directory. */
 export class CustomerService {
@@ -15,8 +22,8 @@ export class CustomerService {
 
   /**
    * Refreshes Square customer details on the conversation at most once a day.
-   * Several profiles with the same phone: greet with the newest name but turn card features off,
-   * so we can never charge somebody else's card. Never throws.
+   * Several profiles with the same phone: we can't tell who this is, so no name and no card features,
+   * and we can never charge somebody else's card. Never throws.
    */
   async refresh(conv: Conversation, opts: { force?: boolean } = {}): Promise<void> {
     const last = conv.customerLookupAt ? new Date(conv.customerLookupAt).getTime() : 0;
@@ -31,8 +38,7 @@ export class CustomerService {
         conv.loyaltyAccountId = null;
         return;
       }
-      const best = newest(matches)!;
-      if (!conv.customerName && best.given_name) conv.customerName = best.given_name;
+      const best = matches[0]!;
       if (matches.length > 1) {
         conv.squareCustomerId = null;
         conv.customerAmbiguous = true;
@@ -42,6 +48,7 @@ export class CustomerService {
       }
       conv.squareCustomerId = best.id;
       conv.customerAmbiguous = false;
+      if (!conv.customerName) conv.customerName = cleanName(best.given_name);
       const card = (await this.square.listCards(best.id))[0];
       conv.savedCard = card ? { id: card.id, brand: card.card_brand ?? "Card", last4: card.last_4 ?? "????" } : null;
       const account = await this.square.searchLoyaltyAccount(best.id).catch(() => null);
@@ -73,7 +80,7 @@ export class CustomerService {
 export function customerPromptLine(conv: Conversation): string {
   const known = conv.squareCustomerId || conv.customerAmbiguous;
   if (!known) return "Square customer: no";
-  const name = conv.customerName ? ` (given name ${conv.customerName})` : "";
+  const name = conv.customerName ? ` (given name ${JSON.stringify(conv.customerName)})` : "";
   const card = conv.savedCard ? `${conv.savedCard.brand} ••${conv.savedCard.last4}` : "none";
   return `Square customer: yes${name} · saved card: ${card}${conv.loyaltyAccountId ? " · loyalty member" : ""}`;
 }

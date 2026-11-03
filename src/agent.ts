@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { customerPromptLine } from "./customers.js";
+import { cleanName, customerPromptLine } from "./customers.js";
 import type { OrderService } from "./orders.js";
 import { formatMoney, menuForModel, type MenuService } from "./square/menu.js";
 import type { CartLine, Conversation, OrderRecord, Store, StoredMessage } from "./store/types.js";
@@ -193,7 +193,7 @@ Pickup: ${deps.pickupInstructions}
 Text ordering hours: ${deps.hoursText}
 Right now: ${localNow}. ${status.message}
 
-Customer: ${conv.customerName ?? "(name not given yet)"} · phone ${conv.phone}
+Customer: ${conv.customerName ? JSON.stringify(conv.customerName) : "(name not given yet)"} · phone ${conv.phone}
 ${customerPromptLine(conv)}
 Greet known customers by first name once per chat.
 Pickup note: ${conv.pickupNote ?? "(none)"}
@@ -337,7 +337,7 @@ async function runTool(
     }
     case "set_pickup_details": {
       const p = PickupInput.parse(input);
-      if (p.customer_name) conv.customerName = p.customer_name.trim();
+      if (p.customer_name) conv.customerName = cleanName(p.customer_name) ?? conv.customerName;
       if (p.pickup_note) conv.pickupNote = p.pickup_note.trim();
       return { result: "Saved." };
     }
