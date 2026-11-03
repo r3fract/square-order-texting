@@ -77,6 +77,8 @@ export class TextOrderService {
       pickup: (conv) => this.resolve(conv.pickupTarget ?? { kind: "asap" }),
       allowTipping: d.config.ALLOW_TIPPING,
       oneTapMaxCents: d.config.ONE_TAP_MAX_CENTS,
+      oneTapDailyMaxCents: d.config.ONE_TAP_DAILY_MAX_CENTS,
+      refreshCustomer: (conv) => this.customers.refresh(conv, { force: true }),
       timeZone: d.config.TIMEZONE,
       ensureCustomer: (conv) => this.customers.ensureProfile(conv, `customer:${conv.phone}`),
       now: () => this.now(),
@@ -179,13 +181,13 @@ export class TextOrderService {
   async handleInboundSms(msg: { from: string; body: string; messageSid: string }): Promise<void> {
     if (!(await this.d.store.claimEvent(`twilio:${msg.messageSid}`))) return;
     const from = normalizePhone(msg.from);
-    const paid = await this.withLock(from, () => this.processInbound(from, msg.body ?? ""));
+    const paid = await this.withLock(from, () => this.processInbound(from, msg.body ?? "", msg.messageSid));
     // A saved card was charged during that turn. Marking it paid takes the same lock, so do it now it's released.
     if (paid) await this.markPaid(paid);
   }
 
   /** Returns the Square order id if a saved card was charged during this turn. */
-  private async processInbound(from: string, rawBody: string): Promise<string | undefined> {
+  private async processInbound(from: string, rawBody: string, messageSid: string): Promise<string | undefined> {
     const { config, store } = this.d;
     const { text: body, found: hadCard } = redactCardNumbers(rawBody.trim());
 
@@ -245,6 +247,7 @@ export class TextOrderService {
       timeZone: config.TIMEZONE,
       gameSummary: () => this.game?.describe(config.TIMEZONE) ?? "No game clock (feed not set up).",
       resolvePickup: (t) => this.resolve(t),
+      inbound: { text: body, turnId: messageSid },
       forgetCard: async (c) => {
         await this.d.square.disableCard(c.savedCard!.id);
         c.savedCard = null;
@@ -495,7 +498,12 @@ export class TextOrderService {
       try {
         if (await this.orders.retire(o, "expired")) {
           n++;
-          await this.sendCustomer(o.phone, `Your payment link for order #${o.orderNumber} expired. Text us again if you still want it.`);
+          await this.sendCustomer(
+            o.phone,
+            o.checkoutKind === "card_on_file"
+              ? `We couldn't confirm the card payment for order #${o.orderNumber}, so it was cancelled. You weren't charged. Text us again if you still want it.`
+              : `Your payment link for order #${o.orderNumber} expired. Text us again if you still want it.`,
+          );
         }
       } catch (err) {
         this.log(`couldn't expire order ${o.id}`, err);

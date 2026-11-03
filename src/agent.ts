@@ -163,6 +163,8 @@ export interface AgentDeps {
   resolvePickup: (t: PickupTarget) => ResolvedPickup;
   /** Disables the customer's saved card in Square. */
   forgetCard: (conv: Conversation) => Promise<void>;
+  /** The customer's own text this turn and when it arrived: charging checks consent against these, not the AI. */
+  inbound: { text: string; turnId: string };
 }
 
 export interface AgentTurnResult {
@@ -395,7 +397,7 @@ async function runTool(
         conv.pendingOneTap = null;
         return { result: `Cart saved but has problems. Fix or ask the customer:\n${q.problems.join("\n")}` };
       }
-      let offer = deps.orders.offerOneTap(conv, q.quote.totalCents)
+      let offer = (await deps.orders.offerOneTap(conv, q.quote.totalCents, deps.inbound.turnId))
         ? `\nOffer one-word pay: end your read-back with "Pay with ${conv.savedCard!.brand} ••${conv.savedCard!.last4}? Reply Y." Don't send a link unless they ask.`
         : "";
       if (!offer && deps.orders.shouldOfferCardSave(conv)) {
@@ -439,7 +441,7 @@ async function runTool(
       };
     }
     case "pay_with_saved_card": {
-      const r = await deps.orders.payWithSavedCard(conv);
+      const r = await deps.orders.payWithSavedCard(conv, { text: deps.inbound.text, turnId: deps.inbound.turnId });
       if (r.ok) {
         return {
           result: `Paid with the saved card: order #${r.order.orderNumber}, total ${formatMoney(r.order.totalCents, r.order.currency)}. The summary is appended for you; just say thanks.`,

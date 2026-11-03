@@ -151,6 +151,58 @@ describe("one-word pay with a saved card", () => {
     expect((await t.store.getConversation(PHONE)).savedCard).toBeNull();
   });
 
+  it("the AI can't pay in the same turn it made the offer", async () => {
+    const t = setup();
+    t.model.push(tool("set_cart", LINES), tool("pay_with_saved_card"), say("Paid?"));
+    await t.text("a poutine please");
+    expect(t.square.payments).toHaveLength(0);
+    expect(t.lastToolResult()).toContain("Wait for them to reply Y");
+  });
+
+  it("only a plain yes pays, whatever the AI decides", async () => {
+    const t = setup();
+    await offer(t);
+    t.model.push(tool("pay_with_saved_card"), say("Paid?"));
+    await t.text("hmm what about fries too");
+    expect(t.square.payments).toHaveLength(0);
+    expect(t.lastToolResult()).toContain("Wait for them to reply Y");
+    t.model.push(tool("pay_with_saved_card"), say("Done"));
+    await t.text("Yep!");
+    expect(t.square.payments).toHaveLength(1);
+  });
+
+  it("a card removed in Square after the offer isn't charged", async () => {
+    const t = setup();
+    await offer(t);
+    t.square.cards.get("C1")![0]!.enabled = false;
+    t.model.push(tool("pay_with_saved_card"), say("Hmm"));
+    await t.text("Y");
+    expect(t.square.payments).toHaveLength(0);
+    expect(t.lastToolResult()).toContain("The saved card isn't available anymore");
+  });
+
+  it("an unclear Square error doesn't send a link (no double charge)", async () => {
+    const t = setup();
+    await offer(t);
+    t.square.failNext.createPayment = new SquareError("Square hiccup", 500, [{ code: "INTERNAL_SERVER_ERROR" }]);
+    t.model.push(tool("pay_with_saved_card"), say("Checking."));
+    await t.text("Y");
+    expect(t.square.calls).not.toContain("createPaymentLink");
+    expect(t.lastToolResult()).toContain("couldn't confirm that payment with Square yet");
+    const order = (await t.store.listOrders(1))[0]!;
+    expect(order).toMatchObject({ checkoutKind: "card_on_file", status: "awaiting_payment" });
+  });
+
+  it("a daily cap per phone stops one-word pay", async () => {
+    const t = setup({ ONE_TAP_DAILY_MAX_CENTS: "1500" });
+    await offer(t);
+    t.model.push(tool("pay_with_saved_card"), say("Done"));
+    await t.text("Y");
+    expect(t.square.payments).toHaveLength(1);
+    await offer(t); // second $10.17 order would make $20.34 today
+    expect((await t.store.getConversation(PHONE)).pendingOneTap).toBeNull();
+  });
+
   it("two profiles on one phone never get one-word pay", async () => {
     const t = setup();
     t.square.customers.push({ id: "C2", given_name: "Other", phone_number: PHONE });

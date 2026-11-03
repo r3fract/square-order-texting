@@ -47,6 +47,7 @@ const Env = z.object({
   PREP_MINUTES: z.coerce.number().int().positive().default(8),
   INTERMISSION_CAPACITY: z.coerce.number().int().positive().default(40),
   ONE_TAP_MAX_CENTS: z.coerce.number().int().positive().default(6000),
+  ONE_TAP_DAILY_MAX_CENTS: z.coerce.number().int().positive().default(15000), // per phone, last 24h
 });
 
 export type Config = z.infer<typeof Env> & { hours: OrderingHours };

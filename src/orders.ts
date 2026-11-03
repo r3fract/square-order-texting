@@ -6,6 +6,23 @@ import type { CartLine, Conversation, OrderRecord, Store } from "./store/types.j
 
 export const MAX_QTY_PER_LINE = 25;
 const ONE_TAP_WINDOW_MS = 10 * 60_000;
+const DAY_MS = 24 * 60 * 60_000;
+/** The only replies that count as "yes, charge my card". Checked in code, not left to the AI. */
+const AFFIRMATIVE = /^\s*(y|yes|yep|yup|yeah)\s*[.!]*\s*$/i;
+/** Square error codes that mean the card was declined (safe to offer a link instead). Anything else: outcome unknown. */
+const DECLINE_CODES = new Set([
+  "CARD_DECLINED", "GENERIC_DECLINE", "INSUFFICIENT_FUNDS", "CVV_FAILURE", "ADDRESS_VERIFICATION_FAILURE", "CARD_EXPIRED",
+  "INVALID_EXPIRATION", "BAD_EXPIRATION", "CARD_NOT_SUPPORTED", "INVALID_CARD", "INVALID_ACCOUNT", "PAN_FAILURE",
+  "TRANSACTION_LIMIT", "CARD_DECLINED_CALL_ISSUER", "CARD_DECLINED_VERIFICATION_REQUIRED", "VOICE_FAILURE",
+  "ALLOWABLE_PIN_TRIES_EXCEEDED", "EXPIRATION_FAILURE", "INVALID_PIN", "CHIP_INSERTION_REQUIRED",
+]);
+
+/** What the customer actually sent this turn, so consent is checked in code. */
+export interface Consent {
+  text: string;
+  /** Id of the inbound text being handled (Twilio message SID). */
+  turnId: string;
+}
 
 /** Stable fingerprint of a cart, so a one-word "Y" only pays for exactly what was read back. */
 export function cartHash(cart: CartLine[]): string {
@@ -154,6 +171,9 @@ export interface OrderServiceDeps {
   pickup: (conv: Conversation) => ResolvedPickup;
   allowTipping?: boolean;
   oneTapMaxCents: number;
+  oneTapDailyMaxCents: number;
+  /** Re-reads the customer's Square profile and saved card right before a charge. */
+  refreshCustomer: (conv: Conversation) => Promise<void>;
   timeZone: string;
   /** Finds or creates the Square customer profile for this phone (invoices need one). */
   ensureCustomer: (conv: Conversation) => Promise<string>;
@@ -254,18 +274,28 @@ export class OrderService {
     return (this.d.now ?? (() => new Date()))();
   }
 
-  /** One-word pay is only for a single, unambiguous Square customer with a saved card, under the cap. */
-  oneTapEligible(conv: Conversation, totalCents: number): boolean {
-    return !!(conv.savedCard && conv.squareCustomerId && !conv.customerAmbiguous && totalCents > 0 && totalCents <= this.d.oneTapMaxCents);
+  /** Card-on-file charges for this phone in the last 24 hours. */
+  private async spentToday(phone: string): Promise<number> {
+    const since = this.nowDate().getTime() - DAY_MS;
+    return (await this.d.store.listOrders(500))
+      .filter((o) => o.phone === phone && o.checkoutKind === "card_on_file" && o.squarePaymentId && o.createdAt.getTime() >= since)
+      .filter((o) => ["paid", "ready", "picked_up", "awaiting_payment"].includes(o.status))
+      .reduce((s, o) => s + o.totalCents, 0);
+  }
+
+  /** One-word pay is only for a single, unambiguous Square customer with a saved card, under the per-order and daily caps. */
+  async oneTapEligible(conv: Conversation, totalCents: number): Promise<boolean> {
+    if (!(conv.savedCard && conv.squareCustomerId && !conv.customerAmbiguous && totalCents > 0 && totalCents <= this.d.oneTapMaxCents)) return false;
+    return (await this.spentToday(conv.phone)) + totalCents <= this.d.oneTapDailyMaxCents;
   }
 
   /** After a successful quote: open (or clear) the one-word pay offer for exactly this cart and total. */
-  offerOneTap(conv: Conversation, totalCents: number): boolean {
-    if (!this.oneTapEligible(conv, totalCents)) {
+  async offerOneTap(conv: Conversation, totalCents: number, turnId?: string): Promise<boolean> {
+    if (!(await this.oneTapEligible(conv, totalCents))) {
       conv.pendingOneTap = null;
       return false;
     }
-    conv.pendingOneTap = { cartHash: cartHash(conv.cart), totalCents, offeredAt: this.nowDate() };
+    conv.pendingOneTap = { cartHash: cartHash(conv.cart), totalCents, offeredAt: this.nowDate(), ...(turnId ? { turnId } : {}) };
     return true;
   }
 
@@ -273,9 +303,12 @@ export class OrderService {
    * Charges the saved card for the cart the customer just said "Y" to. Refuses (never charges) unless the offer is
    * open, under 10 minutes old, for this exact cart, and Square's order total still matches what was offered.
    */
-  async payWithSavedCard(conv: Conversation): Promise<CardPayResult> {
+  async payWithSavedCard(conv: Conversation, consent: Consent): Promise<CardPayResult> {
     const now = this.nowDate();
     const p = conv.pendingOneTap;
+    if (p && (!AFFIRMATIVE.test(consent.text) || p.turnId === consent.turnId)) {
+      return { ok: false, reason: "Wait for them to reply Y to your offer before calling pay_with_saved_card." };
+    }
     if (!p) {
       const recent = (await this.d.store.listOrders(50)).find(
         (o) => o.phone === conv.phone && o.checkoutKind === "card_on_file" && o.squarePaymentId && now.getTime() - o.createdAt.getTime() < ONE_TAP_WINDOW_MS,
@@ -290,7 +323,13 @@ export class OrderService {
       conv.pendingOneTap = null;
       return { ok: false, reason: "That offer expired. Call set_cart, read the order back and offer again." };
     }
-    if (!this.oneTapEligible(conv, p.totalCents)) {
+    const offeredCardId = conv.savedCard?.id;
+    await this.d.refreshCustomer(conv); // the card or profile may have changed in Square since the offer
+    if (!conv.savedCard || conv.savedCard.id !== offeredCardId) {
+      conv.pendingOneTap = null;
+      return { ok: false, reason: "The saved card isn't available anymore. Send the payment link instead." };
+    }
+    if (!(await this.oneTapEligible(conv, p.totalCents))) {
       conv.pendingOneTap = null;
       return { ok: false, reason: "One-word pay isn't available for this order. Send the payment link instead." };
     }
@@ -324,7 +363,7 @@ export class OrderService {
     });
     const quote = quoteFromOrder(sqOrder);
     if (quote.totalCents !== p.totalCents) {
-      conv.pendingOneTap = { cartHash: p.cartHash, totalCents: quote.totalCents, offeredAt: now };
+      conv.pendingOneTap = { cartHash: p.cartHash, totalCents: quote.totalCents, offeredAt: now, turnId: consent.turnId };
       return { ok: false, reason: `The total is now ${formatMoney(quote.totalCents, quote.currency)}. Read that out and ask them to reply Y again to pay it.` };
     }
 
@@ -356,6 +395,7 @@ export class OrderService {
     await this.d.store.createOrder(record); // before charging, so Square's webhook can find it
 
     let payment;
+    let unclear = false;
     try {
       payment = await this.d.square.createPayment({
         idempotencyKey: `card:${recordId}`,
@@ -366,10 +406,19 @@ export class OrderService {
         locationId: this.d.locationId,
       });
     } catch (err) {
-      if (!(err instanceof SquareError)) throw err;
-      payment = null; // Square reports declines as errors too
+      payment = null;
+      // A clear decline is safe to fall back from. Anything else (timeouts, 5xx) may still have charged the card.
+      const codes = err instanceof SquareError ? err.errors.map((e) => e.code ?? "") : [];
+      unclear = !codes.some((c) => DECLINE_CODES.has(c));
     }
     conv.pendingOneTap = null;
+    if (unclear || (payment && payment.status !== "COMPLETED" && payment.status !== "FAILED")) {
+      // Leave the record awaiting payment: Square's webhook marks it paid if the charge went through.
+      return {
+        ok: false,
+        reason: "We couldn't confirm that payment with Square yet. Tell them not to pay again: they'll get a text as soon as it goes through.",
+      };
+    }
     if (!payment || payment.status !== "COMPLETED") {
       await this.d.store.transitionOrder(record.id, ["awaiting_payment"], { status: "canceled" });
       return { ok: false, reason: "The saved card was declined.", fallbackToLink: true };

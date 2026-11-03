@@ -22,6 +22,8 @@ export interface PendingOneTap {
   cartHash: string;
   totalCents: number;
   offeredAt: Date;
+  /** The inbound text the offer was made in reply to: a Y has to come in a later text. */
+  turnId?: string;
 }
 
 /** A message in the model conversation, stored as Anthropic message params. */
