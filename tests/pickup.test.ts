@@ -201,6 +201,23 @@ describe("ordering for an intermission", () => {
     expect(JSON.stringify(t.model.requests.at(-1)!.messages.at(-1))).toContain("About 3:30 is full. Want a different time, or right away?");
   });
 
+  it("STATUS shows the game and slot counts; GAME shows just the game", async () => {
+    const t = setup();
+    await t.service.game!.tick();
+    for (const phone of ["+18075550001", "+18075550002"]) {
+      t.model.push(tool("set_cart", LINES), tool("set_pickup_time", { target: "intermission_2" }), tool("send_checkout_link"), say("ok"));
+      await t.text("poutine end of 2nd", phone);
+      await t.pay((await t.store.getAwaitingOrderForPhone(phone))!.squareOrderId);
+    }
+    const OWNER = "+18075550100";
+    await t.text("STATUS", OWNER);
+    const status = t.sms.last(OWNER);
+    expect(status).toContain("Lakers vs DID 3:15pm · not started · int1 ≈ 3:50pm · int2 ≈ 4:43pm");
+    expect(status).toContain("int1: 0 · int2: 2 · after: 0");
+    await t.text("GAME", OWNER);
+    expect(t.sms.last(OWNER)).toBe("Lakers vs DID 3:15pm · not started · int1 ≈ 3:50pm · int2 ≈ 4:43pm · end ≈ 5:36pm");
+  });
+
   it("ASAP paid text says the place in line", async () => {
     const t = setup();
     t.model.push(tool("set_cart", LINES), tool("send_checkout_link"), say("ok"));

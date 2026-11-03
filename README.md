@@ -25,7 +25,8 @@ Customer SMS ─► Twilio ─► this service (Claude + tools) ─► Square Ca
 | Text | Does |
 |---|---|
 | `PAUSE` / `RESUME` | Turn text ordering off/on (e.g. during a rush) |
-| `STATUS` | Open/closed, paid orders waiting, recent orders |
+| `STATUS` | Open/closed, paid orders waiting, tonight's game and orders per intermission, recent orders |
+| `GAME` | Today's Lakers home game: period, clock and estimated intermissions |
 | `TO 1234 your message` | Reply to the customer whose number ends in 1234 (bot goes quiet for 2h) |
 | `BOT 1234` | Give that customer back to the bot |
 
@@ -33,13 +34,37 @@ Customers can text `HUMAN` (or the AI hands off on complaints, refunds, allergy 
 
 Anything else you text from your own phone is treated like a customer order, which is handy for testing.
 
+## Hours come from Square
+
+Text ordering is open only during the Square location's **business hours** (Square Dashboard → Locations). With none set, it's closed and you get a text at startup. `ORDERING_HOURS` in `.env` overrides Square when set. Games don't open ordering: set your game-night hours in Square.
+
+## Game night
+
+The app follows today's Fort Frances Lakers **home** game on the HockeyTech feed that sijhlhockey.com uses (`HOCKEYTECH_*` settings). It polls every 30 seconds from 30 minutes before puck drop until the game is final, and once an hour otherwise.
+
+- Fans text "poutine for the end of the 2nd", "next intermission", "after the game" or a time like "8:15". The order goes to Square as a **scheduled** pickup and reaches the kitchen screen `PREP_MINUTES` before the break.
+- Intermission times are estimated from the live clock. If a period runs 5+ minutes long or short, the customer gets one heads-up text, and the pickup time in Square moves with it.
+- Each intermission takes up to `INTERMISSION_CAPACITY` orders, then the bot offers the next one. Orders for later intermissions don't count against `MAX_ACTIVE_ORDERS`.
+- If the feed is down, or shows overtime or an unknown state, game-timed pickups switch off (right away and clock times still work) and you get one alert per game.
+- It's the league's data: ask the SIJHL or HockeyTech before relying on it. `npx tsx --env-file=.env scripts/game.ts` shows what the app sees right now.
+
+## One-word pay and saved cards
+
+- A customer whose phone number matches **one** Square customer profile is greeted by name.
+- If that profile has a saved card, the bot reads back the order and asks "Pay with VISA ••1111? Reply Y". A plain "Y" / "yes" / "yep" in the next text charges the card. No link.
+- The code (not the AI) checks the cart is unchanged, the offer is under 10 minutes old and Square's total still matches, and re-reads the card in Square first. Limits: `ONE_TAP_MAX_CENTS` per order and `ONE_TAP_DAILY_MAX_CENTS` per phone per day.
+- A declined card gets a link instead. If Square's answer is unclear, nothing else can be paid for that phone until the sweep checks the order in Square.
+- Customers Square knows without a saved card are offered, once, a Square **invoice page** with a "Save my card on file" box. Ticking it sets up one-word pay for next time.
+- "Forget my card" removes it. "The usual" reorders their last paid order.
+- **Square Loyalty:** existing members earn points when the order is picked up, and can redeem a reward with one-word pay or the save-card page. Nobody is enrolled automatically.
+
 ## Setup
 
 ### 1. Square
 1. Go to developer.squareup.com and create an application.
 2. Copy the **Sandbox** access token and a sandbox **Location ID** into `.env` (`SQUARE_ENV=sandbox`).
 3. Add catalog items in the sandbox Square Dashboard, with modifier lists for things like soda base and flavour shots. Mark required choices as required (min 1). Run `npm run menu` to see the menu exactly as the AI will.
-4. Under **Webhooks**, add a subscription to `https://YOUR_DOMAIN/webhooks/square` with the events `payment.created`, `payment.updated` and `order.fulfillment.updated`. Copy the **signature key** to `SQUARE_WEBHOOK_SIGNATURE_KEY`.
+4. Under **Webhooks**, add a subscription to `https://YOUR_DOMAIN/webhooks/square` with the events `payment.created`, `payment.updated`, `order.fulfillment.updated` and `invoice.payment_made`. Copy the **signature key** to `SQUARE_WEBHOOK_SIGNATURE_KEY`.
 5. Production: swap in the production token, location and webhook signature key, and set `SQUARE_ENV=production`. Apple Pay only works in production; the sandbox only takes test cards.
 
 ### 2. Twilio
@@ -98,7 +123,7 @@ order.yourdomain.ca {
 
 ## Development
 ```bash
-npm test                    # 46 tests: guards, cart rules, pricing, full order flows, webhook retries, races, AI price guard
+npm test                    # guards, cart rules, pricing, order flows, webhooks, game timing, one-word pay, loyalty
 TEST_DATABASE_URL=postgres://... npm test   # also tests the Postgres store
 npm run typecheck
 ```

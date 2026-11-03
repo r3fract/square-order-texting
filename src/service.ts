@@ -291,6 +291,17 @@ export class TextOrderService {
   /* ---------------- owner commands ---------------- */
 
   /** Returns true if the owner's text was a command. Anything else is treated like a normal customer text (handy for testing). */
+  /** Game line plus orders per game slot, for STATUS. */
+  private async gameStatusLines(): Promise<string> {
+    if (!this.game) return "Game feed: off";
+    const desc = this.game.describe(this.d.config.TIMEZONE);
+    const g = this.game.homeGameToday();
+    if (!g) return desc;
+    const live = (await this.d.store.listOrdersInSlotPrefix(`game:${g.id}:`)).filter((o) => o.status === "paid" || o.status === "awaiting_payment");
+    const n = (slot: string) => live.filter((o) => o.pickupSlot === `game:${g.id}:${slot}`).length;
+    return `${desc}\nint1: ${n("int1")} · int2: ${n("int2")} · after: ${n("end")}`;
+  }
+
   private async handleOwnerCommand(body: string): Promise<boolean> {
     const { store } = this.d;
     const owner = this.d.config.OWNER_PHONE;
@@ -313,7 +324,11 @@ export class TextOrderService {
       const active = await store.countActiveOrders();
       const recent = (await store.listOrders(10)).filter((o) => o.status === "paid" || o.status === "awaiting_payment");
       const lines = recent.map((o) => `#${o.orderNumber} ${formatMoney(o.totalCents, o.currency)} ${o.status === "paid" ? "PAID" : "unpaid"}`);
-      await this.send(owner, `${s.message}\nPaid & waiting: ${active}/${this.d.config.MAX_ACTIVE_ORDERS}\n${lines.join("\n")}`.trim());
+      await this.send(owner, `${s.message}\nPaid & waiting: ${active}/${this.d.config.MAX_ACTIVE_ORDERS}\n${await this.gameStatusLines()}\n${lines.join("\n")}`.trim());
+      return true;
+    }
+    if (cmd === "GAME") {
+      await this.send(owner, this.game ? this.game.describe(this.d.config.TIMEZONE) : "Game feed: off");
       return true;
     }
     if ((cmd === "TO" || cmd === "BOT") && rest[0]) {
