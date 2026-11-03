@@ -71,7 +71,7 @@ describe("a full text order", () => {
 
     // 3. Square says it's paid.
     await t.squareEvent("payment.updated", { payment: { status: "COMPLETED", order_id: "SQORD1" } });
-    expect(t.sms.last(CUSTOMER)).toBe("Paid, thanks! Your order number is #1. We'll text you when it's ready.");
+    expect(t.sms.last(CUSTOMER)).toBe("Paid, thanks! Order #1. You're 1st in line. We'll text you when it's ready.");
     expect((await t.store.getOrderBySquareId("SQORD1"))!.status).toBe("paid");
     expect((await t.store.getConversation(CUSTOMER)).cart).toEqual([]);
 

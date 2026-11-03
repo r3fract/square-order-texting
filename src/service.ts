@@ -3,14 +3,15 @@ import type { Config } from "./config.js";
 import { describeHours, isOpen, keyword, nextOpeningText, normalizePhone, redactCardNumbers } from "./guards.js";
 import { CustomerService } from "./customers.js";
 import { fetchScorebar, type FeedGame } from "./game/hockeytech.js";
-import { GameService } from "./game/service.js";
+import { GameService, ordinal } from "./game/service.js";
 import type { Timeline } from "./game/timeline.js";
 import { HoursService } from "./hours.js";
+import { resolvePickup, shortTime, type ResolvedPickup } from "./pickup.js";
 import { OrderService } from "./orders.js";
 import type { SquareApi } from "./square/client.js";
 import { formatMoney, MenuService } from "./square/menu.js";
 import type { SmsSender } from "./sms.js";
-import type { Conversation, Store } from "./store/types.js";
+import type { Conversation, OrderRecord, PickupTarget, Store } from "./store/types.js";
 
 const HISTORY_RESET_MS = 6 * 60 * 60 * 1000; // a new chat after 6 quiet hours
 const HANDOFF_MS = 2 * 60 * 60 * 1000; // bot stays quiet for 2h after a handoff unless staff hand back
@@ -68,6 +69,9 @@ export class TextOrderService {
       store: d.store,
       locationId: d.config.SQUARE_LOCATION_ID,
       maxActiveOrders: d.config.MAX_ACTIVE_ORDERS,
+      intermissionCapacity: d.config.INTERMISSION_CAPACITY,
+      prepMinutes: d.config.PREP_MINUTES,
+      pickup: (conv) => this.resolve(conv.pickupTarget ?? { kind: "asap" }),
       allowTipping: d.config.ALLOW_TIPPING,
       now: () => this.now(),
       isAcceptingOrders: async () => {
@@ -99,6 +103,13 @@ export class TextOrderService {
       return { open: false, message: `Text ordering is closed right now. ${nextOpeningText(hours, this.now(), config.TIMEZONE)}`.trim() };
     }
     return { open: true, message: "Text ordering is open." };
+  }
+
+  /** A pickup target against the current game state. */
+  resolve(t: PickupTarget): ResolvedPickup {
+    const game = this.game?.homeGameToday() ?? null;
+    const today = game ? { game, timeline: this.game!.state()?.timeline ?? null } : null;
+    return resolvePickup(t, today, this.game?.usable() ?? false, this.now(), this.d.config.TIMEZONE);
   }
 
   /** Called by the game poller whenever the intermission estimate changes. Scheduled orders follow in Task 7. */
@@ -191,6 +202,7 @@ export class TextOrderService {
       conv.messages = [];
       conv.cart = [];
       conv.pickupNote = null;
+      conv.pickupTarget = null;
     }
 
     const agentDeps: AgentDeps = {
@@ -206,6 +218,8 @@ export class TextOrderService {
       handoff: (c, reason) => this.startHandoff(c, reason),
       now: this.now,
       timeZone: config.TIMEZONE,
+      gameSummary: () => this.game?.describe(config.TIMEZONE) ?? "No game clock (feed not set up).",
+      resolvePickup: (t) => this.resolve(t),
     };
 
     await this.customers.refresh(conv);
@@ -352,6 +366,7 @@ export class TextOrderService {
     await this.withLock(order.phone, async () => {
       const conv = await this.d.store.getConversation(order.phone);
       conv.cart = [];
+      conv.pickupTarget = null; // the next order starts back at right away
       if (!conv.squareCustomerId && !conv.customerAmbiguous) {
         await this.customers.ensureProfile(conv, `customer:${order.id}`).catch((err) => this.log("couldn't create Square customer", err));
       }
@@ -359,7 +374,25 @@ export class TextOrderService {
       appendNote(conv, `(system: payment received for order #${order.orderNumber})`, `Paid. Order #${order.orderNumber} sent to the kitchen.`);
       await this.save(conv);
     });
-    await this.sendCustomer(order.phone, `Paid, thanks! Your order number is #${order.orderNumber}. We'll text you when it's ready.${note}`);
+    await this.sendCustomer(order.phone, `${await this.paidText(order)}${note}`);
+  }
+
+  /** "Paid, thanks! Order #12. You're 3rd for the 2nd intermission, ready about 8:28. ..." */
+  private async paidText(order: OrderRecord): Promise<string> {
+    const tail = "We'll text you when it's ready.";
+    const slot = order.pickupSlot ?? "asap";
+    if (slot.startsWith("game:") && order.pickupAt) {
+      const ahead = (await this.d.store.listOrdersInSlotPrefix(slot)).filter(
+        (o) => o.pickupSlot === slot && o.id !== order.id && o.paidAt && order.paidAt && o.paidAt <= order.paidAt && ["paid", "ready", "picked_up"].includes(o.status),
+      ).length;
+      const label = slot.endsWith(":end") ? "after the game" : `the ${ordinal(Number(slot.slice(-1)))} intermission`;
+      return `Paid, thanks! Order #${order.orderNumber}. You're ${ordinal(ahead + 1)} for ${label}, ready about ${shortTime(order.pickupAt, this.d.config.TIMEZONE)}. ${tail}`;
+    }
+    if (slot === "clock" && order.pickupAt) {
+      return `Paid, thanks! Order #${order.orderNumber}. Ready about ${shortTime(order.pickupAt, this.d.config.TIMEZONE)}. ${tail}`;
+    }
+    const inLine = await this.d.store.countActiveAsapOrders(this.now());
+    return `Paid, thanks! Order #${order.orderNumber}. You're ${ordinal(Math.max(1, inLine))} in line. ${tail}`;
   }
 
   private async onReady(squareOrderId: string) {

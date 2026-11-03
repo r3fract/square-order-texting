@@ -1,8 +1,9 @@
 import { z } from "zod";
 import { cleanName, customerPromptLine } from "./customers.js";
 import type { OrderService } from "./orders.js";
+import { shortTime, targetFromTool, type ResolvedPickup } from "./pickup.js";
 import { formatMoney, menuForModel, type MenuService } from "./square/menu.js";
-import type { CartLine, Conversation, OrderRecord, Store, StoredMessage } from "./store/types.js";
+import type { CartLine, Conversation, OrderRecord, PickupTarget, Store, StoredMessage } from "./store/types.js";
 
 /* ---------- minimal model interface (the real one wraps @anthropic-ai/sdk; tests use a fake) ---------- */
 
@@ -49,6 +50,11 @@ const PickupInput = z.object({
 
 const HandoffInput = z.object({ reason: z.string().max(300) });
 
+const PickupTimeInput = z.object({
+  target: z.enum(["asap", "intermission_1", "intermission_2", "next_intermission", "after_game", "clock"]),
+  clock: z.string().max(10).optional(),
+});
+
 export const TOOLS: ModelRequest["tools"] = [
   {
     name: "set_cart",
@@ -80,6 +86,19 @@ export const TOOLS: ModelRequest["tools"] = [
     input_schema: {
       type: "object",
       properties: { customer_name: { type: "string" }, pickup_note: { type: "string" } },
+    },
+  },
+  {
+    name: "set_pickup_time",
+    description:
+      "Set when they'll pick up. Use for 'end of the 1st/2nd', 'next intermission', 'after the game', a clock time ('8:15', 24h HH:MM in clock), or 'now'. Returns the pickup time to tell them, or why it can't be done.",
+    input_schema: {
+      type: "object",
+      properties: {
+        target: { type: "string", enum: ["asap", "intermission_1", "intermission_2", "next_intermission", "after_game", "clock"] },
+        clock: { type: "string", description: "Only for target=clock: local time as HH:MM, 24h" },
+      },
+      required: ["target"],
     },
   },
   {
@@ -121,6 +140,10 @@ export interface AgentDeps {
   handoff: (conv: Conversation, reason: string) => Promise<void>;
   now?: () => Date;
   timeZone: string;
+  /** One line about today's Lakers home game for the prompt. */
+  gameSummary: () => string;
+  /** Resolves a pickup target against the live game clock. */
+  resolvePickup: (t: PickupTarget) => ResolvedPickup;
 }
 
 export interface AgentTurnResult {
@@ -189,6 +212,8 @@ How to take an order:
 6. For questions about an existing order, go by the order status list below, not your memory of the chat. If an order is "ready for pickup", say so. Only say it's being made if it says "paid, being made". If they say they already picked it up, take their word for it.
 7. Something new after an order is paid is a separate order with its own link. Say that once, briefly.
 
+Game: ${deps.gameSummary()}
+When they say end of a period, intermission, after the game or a time, call set_pickup_time. Never work out times yourself.
 Pickup: ${deps.pickupInstructions}
 Text ordering hours: ${deps.hoursText}
 Right now: ${localNow}. ${status.message}
@@ -340,6 +365,16 @@ async function runTool(
       if (p.customer_name) conv.customerName = cleanName(p.customer_name) ?? conv.customerName;
       if (p.pickup_note) conv.pickupNote = p.pickup_note.trim();
       return { result: "Saved." };
+    }
+    case "set_pickup_time": {
+      const { target, clock } = PickupTimeInput.parse(input);
+      const t = targetFromTool(target, clock);
+      if (!t) return { result: "Give a clock time as HH:MM (24h) for target=clock." };
+      const r = deps.resolvePickup(t);
+      if (!r.ok) return { result: r.reason };
+      conv.pickupTarget = t;
+      if (!r.pickupAt) return { result: "Pickup set for right away." };
+      return { result: `Pickup set for ${r.label}, ready about ${shortTime(r.pickupAt, deps.timeZone)}.` };
     }
     case "send_checkout_link": {
       if (conv.cart.length === 0) return { result: "Can't send a link: the cart is empty." };

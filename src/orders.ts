@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { SquareApi, SquareOrder, SquareOrderInput } from "./square/client.js";
 import { formatMoney, variationAvailable, type Menu, type MenuService } from "./square/menu.js";
+import type { ResolvedPickup } from "./pickup.js";
 import type { CartLine, Conversation, OrderRecord, Store } from "./store/types.js";
 
 export const MAX_QTY_PER_LINE = 25;
@@ -69,6 +70,9 @@ export function buildSquareOrder(opts: {
   conv: Conversation;
   orderNumber?: number;
   pickupPrepMinutes?: number;
+  /** Set for scheduled pickups (intermission, after the game, clock time). */
+  pickupAt?: Date | null;
+  pickupLabel?: string;
 }): SquareOrderInput {
   const { cart, conv } = opts;
   return {
@@ -86,9 +90,14 @@ export function buildSquareOrder(opts: {
         state: "PROPOSED",
         pickup_details: {
           recipient: { display_name: conv.customerName || `Text order${opts.orderNumber ? ` #${opts.orderNumber}` : ""}`, phone_number: conv.phone },
-          schedule_type: "ASAP",
+          ...(opts.pickupAt
+            ? { schedule_type: "SCHEDULED", pickup_at: opts.pickupAt.toISOString() }
+            : { schedule_type: "ASAP" }),
           ...(opts.pickupPrepMinutes ? { prep_time_duration: `PT${opts.pickupPrepMinutes}M` } : {}),
-          note: [opts.orderNumber ? `Text order #${opts.orderNumber}` : "Text order", conv.pickupNote].filter(Boolean).join(" · ").slice(0, 500),
+          note: [opts.orderNumber ? `Text order #${opts.orderNumber}` : "Text order", opts.pickupAt ? opts.pickupLabel : null, conv.pickupNote]
+            .filter(Boolean)
+            .join(" · ")
+            .slice(0, 500),
         },
       },
     ],
@@ -130,6 +139,10 @@ export interface OrderServiceDeps {
   store: Store;
   locationId: string;
   maxActiveOrders: number;
+  intermissionCapacity: number;
+  prepMinutes: number;
+  /** Resolves the conversation's pickup target against the live game clock. */
+  pickup: (conv: Conversation) => ResolvedPickup;
   allowTipping?: boolean;
   isAcceptingOrders: () => Promise<{ ok: true } | { ok: false; reason: string }>;
   now?: () => Date;
@@ -156,9 +169,10 @@ export class OrderService {
   async checkout(conv: Conversation): Promise<CheckoutResult> {
     const gate = await this.d.isAcceptingOrders();
     if (!gate.ok) return gate;
-    if ((await this.d.store.countActiveOrders()) >= this.d.maxActiveOrders) {
-      return { ok: false, reason: "The kitchen is at its limit for text orders right now. Try again in a few minutes, or order at the window." };
-    }
+    const pickup = this.d.pickup(conv);
+    if (!pickup.ok) return { ok: false, reason: pickup.reason };
+    const full = await this.slotFull(pickup);
+    if (full) return { ok: false, reason: full };
 
     const menu = await this.d.menus.getMenu(true); // fresh catalog: sold-out flags may have changed
     const stock = await this.d.menus.getStock(menu, conv.cart.map((l) => l.variationId));
@@ -168,7 +182,15 @@ export class OrderService {
     await this.retireAwaiting(conv.phone, "replaced");
 
     const orderNumber = await this.d.store.nextOrderNumber();
-    const orderInput = buildSquareOrder({ locationId: this.d.locationId, cart: conv.cart, conv, orderNumber });
+    const orderInput = buildSquareOrder({
+      locationId: this.d.locationId,
+      cart: conv.cart,
+      conv,
+      orderNumber,
+      pickupAt: pickup.pickupAt,
+      pickupLabel: pickup.label,
+      ...(pickup.pickupAt ? { pickupPrepMinutes: this.d.prepMinutes } : {}),
+    });
     const { link, order } = await this.d.square.createPaymentLink({
       idempotencyKey: randomUUID(),
       order: orderInput,
@@ -192,9 +214,9 @@ export class OrderService {
       squarePaymentId: null,
       customerId: conv.squareCustomerId,
       cart: conv.cart,
-      pickupAt: null,
-      pickupSlot: "asap",
-      quotedReadyAt: null,
+      pickupAt: pickup.pickupAt,
+      pickupSlot: pickup.slotKey,
+      quotedReadyAt: pickup.pickupAt,
       etaNotifiedAt: null,
       totalCents: quote.totalCents,
       currency: quote.currency,
@@ -211,6 +233,21 @@ export class OrderService {
       await this.d.square.deletePaymentLink(link.id).catch(() => {});
       throw err;
     }
+  }
+
+  /** Null if the pickup slot has room, else the reason to tell the customer. */
+  async slotFull(p: Extract<ResolvedPickup, { ok: true }>): Promise<string | null> {
+    if (p.slotKey.startsWith("game:")) {
+      if ((await this.d.store.countOrdersInSlot(p.slotKey)) >= this.d.intermissionCapacity) {
+        return `${p.label[0]!.toUpperCase()}${p.label.slice(1)} is full. Want the next one, or right away?`;
+      }
+      return null;
+    }
+    // Orders scheduled for later intermissions don't count against the kitchen's right-now limit.
+    if ((await this.d.store.countActiveAsapOrders((this.d.now ?? (() => new Date()))())) >= this.d.maxActiveOrders) {
+      return "The kitchen is at its limit for text orders right now. Try again in a few minutes, or order at the window.";
+    }
+    return null;
   }
 
   /** Deletes the unpaid payment link (if any) so a stale total can't be paid. */
