@@ -29,7 +29,7 @@ const env = {
 };
 const config = loadConfig(env);
 const store = new MemoryStore();
-const square = createSquareClient({ accessToken: config.SQUARE_ACCESS_TOKEN, env: config.SQUARE_ENV, apiVersion: config.SQUARE_API_VERSION });
+const square = createSquareClient({ accessToken: config.SQUARE_ACCESS_TOKEN, env: config.SQUARE_ENV, apiVersion: config.SQUARE_API_VERSION, locationId: config.SQUARE_LOCATION_ID });
 const service = new TextOrderService({
   config,
   store,

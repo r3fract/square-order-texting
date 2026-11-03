@@ -70,10 +70,12 @@ export interface SquareOrderInput {
   line_items: SquareOrderLineItemInput[];
   fulfillments?: unknown[];
   metadata?: Record<string, string>;
+  customer_id?: string;
 }
 
 export interface SquareOrder {
   id?: string;
+  version?: number;
   state?: string;
   line_items?: {
     uid?: string;
@@ -88,7 +90,52 @@ export interface SquareOrder {
   total_money?: Money;
   total_tax_money?: Money;
   total_discount_money?: Money;
-  fulfillments?: { uid?: string; type?: string; state?: string }[];
+  fulfillments?: { uid?: string; type?: string; state?: string; pickup_details?: { pickup_at?: string } }[];
+}
+
+export interface BusinessHoursPeriod {
+  day_of_week: string;
+  start_local_time: string;
+  end_local_time: string;
+}
+export interface SquareLocation {
+  timezone?: string;
+  business_hours?: { periods?: BusinessHoursPeriod[] };
+}
+export interface SquareCustomer {
+  id: string;
+  given_name?: string;
+  family_name?: string;
+  phone_number?: string;
+  created_at?: string;
+}
+export interface SquareCard {
+  id: string;
+  card_brand?: string;
+  last_4?: string;
+  enabled?: boolean;
+}
+export interface SquarePayment {
+  id: string;
+  status: string;
+  order_id?: string;
+  card_details?: { status?: string };
+}
+export interface SquareInvoice {
+  id: string;
+  version: number;
+  status?: string;
+  public_url?: string;
+  order_id?: string;
+}
+export interface LoyaltyProgram {
+  id: string;
+  reward_tiers: { id: string; name: string; points: number }[];
+  terminology?: { one?: string; other?: string };
+}
+export interface LoyaltyAccount {
+  id: string;
+  balance: number;
 }
 
 export interface PaymentLink {
@@ -111,6 +158,22 @@ export interface SquareApi {
   }): Promise<{ link: PaymentLink; order?: SquareOrder }>;
   deletePaymentLink(id: string): Promise<void>;
   retrieveOrder(id: string): Promise<SquareOrder>;
+
+  retrieveLocation(): Promise<SquareLocation>;
+  searchCustomersByPhone(phone: string): Promise<SquareCustomer[]>;
+  createCustomer(a: { idempotencyKey: string; givenName: string; phone: string }): Promise<SquareCustomer>;
+  listCards(customerId: string): Promise<SquareCard[]>;
+  disableCard(cardId: string): Promise<void>;
+  createOrder(a: { idempotencyKey: string; order: SquareOrderInput }): Promise<SquareOrder>;
+  createPayment(a: { idempotencyKey: string; sourceId: string; customerId: string; orderId: string; amount: Money; locationId: string }): Promise<SquarePayment>;
+  createInvoice(a: { idempotencyKey: string; orderId: string; customerId: string; locationId: string; dueDate: string }): Promise<SquareInvoice>;
+  publishInvoice(id: string, version: number, idempotencyKey: string): Promise<SquareInvoice>;
+  cancelInvoice(id: string, version: number): Promise<void>;
+  updatePickupAt(a: { orderId: string; version: number; fulfillmentUid: string; pickupAt: Date }): Promise<SquareOrder>;
+  retrieveLoyaltyProgram(): Promise<LoyaltyProgram | null>;
+  searchLoyaltyAccount(customerId: string): Promise<LoyaltyAccount | null>;
+  accumulateLoyalty(a: { accountId: string; orderId: string; locationId: string; idempotencyKey: string }): Promise<void>;
+  createLoyaltyReward(a: { accountId: string; rewardTierId: string; orderId: string; idempotencyKey: string }): Promise<void>;
 }
 
 export class SquareError extends Error {
@@ -127,10 +190,12 @@ export function createSquareClient(opts: {
   accessToken: string;
   env: "sandbox" | "production";
   apiVersion: string;
+  locationId: string;
   fetchImpl?: typeof fetch;
 }): SquareApi {
   const base = opts.env === "production" ? "https://connect.squareup.com" : "https://connect.squareupsandbox.com";
   const f = opts.fetchImpl ?? fetch;
+  const enc = encodeURIComponent;
 
   async function call<T>(method: string, path: string, body?: unknown): Promise<T> {
     const res = await f(base + path, {
@@ -225,6 +290,128 @@ export function createSquareClient(opts: {
     async retrieveOrder(id) {
       const res = await call<{ order: SquareOrder }>("GET", `/v2/orders/${encodeURIComponent(id)}`);
       return res.order;
+    },
+
+    async retrieveLocation() {
+      const res = await call<{ location: SquareLocation }>("GET", `/v2/locations/${enc(opts.locationId)}`);
+      return res.location;
+    },
+
+    async searchCustomersByPhone(phone) {
+      const res = await call<{ customers?: SquareCustomer[] }>("POST", "/v2/customers/search", {
+        query: { filter: { phone_number: { exact: phone } } },
+      });
+      return res.customers ?? [];
+    },
+
+    async createCustomer({ idempotencyKey, givenName, phone }) {
+      const res = await call<{ customer: SquareCustomer }>("POST", "/v2/customers", {
+        idempotency_key: idempotencyKey,
+        given_name: givenName,
+        phone_number: phone,
+      });
+      return res.customer;
+    },
+
+    async listCards(customerId) {
+      const res = await call<{ cards?: SquareCard[] }>("GET", `/v2/cards?${new URLSearchParams({ customer_id: customerId })}`);
+      return (res.cards ?? []).filter((c) => c.enabled !== false);
+    },
+
+    async disableCard(cardId) {
+      await call("POST", `/v2/cards/${enc(cardId)}/disable`);
+    },
+
+    async createOrder({ idempotencyKey, order }) {
+      const res = await call<{ order: SquareOrder }>("POST", "/v2/orders", { idempotency_key: idempotencyKey, order });
+      return res.order;
+    },
+
+    async createPayment({ idempotencyKey, sourceId, customerId, orderId, amount, locationId }) {
+      const res = await call<{ payment: SquarePayment }>("POST", "/v2/payments", {
+        idempotency_key: idempotencyKey,
+        source_id: sourceId,
+        customer_id: customerId,
+        order_id: orderId,
+        amount_money: amount,
+        location_id: locationId,
+        autocomplete: true,
+      });
+      return res.payment;
+    },
+
+    async createInvoice({ idempotencyKey, orderId, customerId, locationId, dueDate }) {
+      const res = await call<{ invoice: SquareInvoice }>("POST", "/v2/invoices", {
+        idempotency_key: idempotencyKey,
+        invoice: {
+          location_id: locationId,
+          order_id: orderId,
+          primary_recipient: { customer_id: customerId },
+          delivery_method: "SHARE_MANUALLY",
+          store_payment_method_enabled: true,
+          payment_requests: [{ request_type: "BALANCE", due_date: dueDate }],
+          accepted_payment_methods: { card: true, square_gift_card: false, bank_account: false, buy_now_pay_later: false, cash_app_pay: false },
+        },
+      });
+      return res.invoice;
+    },
+
+    async publishInvoice(id, version, idempotencyKey) {
+      const res = await call<{ invoice: SquareInvoice }>("POST", `/v2/invoices/${enc(id)}/publish`, { version, idempotency_key: idempotencyKey });
+      return res.invoice;
+    },
+
+    async cancelInvoice(id, version) {
+      try {
+        await call("POST", `/v2/invoices/${enc(id)}/cancel`, { version });
+      } catch (e) {
+        if (e instanceof SquareError && e.status === 404) return; // already gone
+        throw e;
+      }
+    },
+
+    async updatePickupAt({ orderId, version, fulfillmentUid, pickupAt }) {
+      const res = await call<{ order: SquareOrder }>("PUT", `/v2/orders/${enc(orderId)}`, {
+        order: {
+          location_id: opts.locationId,
+          version,
+          fulfillments: [{ uid: fulfillmentUid, pickup_details: { pickup_at: pickupAt.toISOString() } }],
+        },
+      });
+      return res.order;
+    },
+
+    async retrieveLoyaltyProgram() {
+      try {
+        const res = await call<{ program: LoyaltyProgram }>("GET", "/v2/loyalty/programs/main");
+        return res.program ?? null;
+      } catch (e) {
+        if (e instanceof SquareError && e.status === 404) return null; // seller doesn't use Square Loyalty
+        throw e;
+      }
+    },
+
+    async searchLoyaltyAccount(customerId) {
+      const res = await call<{ loyalty_accounts?: LoyaltyAccount[] }>("POST", "/v2/loyalty/accounts/search", {
+        query: { customer_ids: [customerId] },
+      });
+      const a = res.loyalty_accounts?.[0];
+      return a ? { id: a.id, balance: a.balance ?? 0 } : null;
+    },
+
+    async accumulateLoyalty({ accountId, orderId, locationId, idempotencyKey }) {
+      await call("POST", `/v2/loyalty/accounts/${enc(accountId)}/accumulate`, {
+        accumulate_points: { order_id: orderId },
+        location_id: locationId,
+        idempotency_key: idempotencyKey,
+      });
+    },
+
+    async createLoyaltyReward({ accountId, rewardTierId, orderId, idempotencyKey }) {
+      await call("POST", "/v2/loyalty/rewards", {
+        reward: { loyalty_account_id: accountId, reward_tier_id: rewardTierId, order_id: orderId },
+        idempotency_key: idempotencyKey,
+      });
     },
   };
 }

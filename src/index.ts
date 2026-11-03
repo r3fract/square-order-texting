@@ -25,6 +25,7 @@ async function main() {
     accessToken: config.SQUARE_ACCESS_TOKEN,
     env: config.SQUARE_ENV,
     apiVersion: config.SQUARE_API_VERSION,
+    locationId: config.SQUARE_LOCATION_ID,
   });
   const sms = createTwilioSender({
     accountSid: config.TWILIO_ACCOUNT_SID,

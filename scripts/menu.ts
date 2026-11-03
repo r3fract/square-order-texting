@@ -12,6 +12,7 @@ const square = createSquareClient({
   accessToken: token,
   env: process.env.SQUARE_ENV === "production" ? "production" : "sandbox",
   apiVersion: process.env.SQUARE_API_VERSION ?? "2026-09-16",
+  locationId: location,
 });
 const menus = new MenuService(square, location);
 const menu = await menus.getMenu(true);

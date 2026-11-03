@@ -1,6 +1,9 @@
 import type { ContentBlock, ModelClient, ModelRequest, ModelResponse } from "../src/agent.js";
 import { loadConfig, type Config } from "../src/config.js";
-import type { SquareApi, SquareCatalogObject, SquareOrder, SquareOrderInput } from "../src/square/client.js";
+import type {
+  BusinessHoursPeriod, LoyaltyAccount, LoyaltyProgram, Money, SquareApi, SquareCard, SquareCatalogObject, SquareCustomer,
+  SquareInvoice, SquareOrder, SquareOrderInput, SquarePayment,
+} from "../src/square/client.js";
 import type { SmsSender } from "../src/sms.js";
 
 export const LOC = "LOC1";
@@ -170,8 +173,143 @@ export class FakeSquare implements SquareApi {
     if (l) l.deleted = true;
   }
   async retrieveOrder(id: string) {
+    const o = this.orders.get(id);
+    if (o) return this.priceStored(id);
     const l = [...this.links.values()].find((x) => x.orderId === id)!;
     return { ...this.price(l.order), id };
+  }
+
+  /* ---- customers, cards, payments, invoices, loyalty ---- */
+  businessHours: BusinessHoursPeriod[] = [];
+  customers: SquareCustomer[] = [];
+  cards = new Map<string, SquareCard[]>();
+  payments: (SquarePayment & { source_id: string; amount: number; customer_id: string })[] = [];
+  invoices = new Map<string, SquareInvoice & { orderId: string; customerId: string; canceled?: boolean; storeCard: boolean }>();
+  orders = new Map<string, { input: SquareOrderInput; version: number; pickupAt?: string; discount: number; fulfillmentUid: string }>();
+  loyalty: { program: LoyaltyProgram | null; accounts: Map<string, LoyaltyAccount> } = { program: null, accounts: new Map() };
+  accumulated: { accountId: string; orderId: string; idempotencyKey: string }[] = [];
+  rewards: { accountId: string; rewardTierId: string; orderId: string }[] = [];
+  /** Discount (cents) Square applies to an order when a loyalty reward is attached. */
+  rewardDiscountCents = 0;
+  /** Makes the next call to the named method throw this error. */
+  failNext: Partial<Record<keyof SquareApi, Error>> = {};
+  private paymentByKey = new Map<string, SquarePayment>();
+
+  private maybeFail(name: keyof SquareApi) {
+    const e = this.failNext[name];
+    if (e) {
+      delete this.failNext[name];
+      throw e;
+    }
+  }
+  private priceStored(id: string): SquareOrder {
+    const o = this.orders.get(id)!;
+    const p = this.price(o.input);
+    const total = (p.total_money?.amount ?? 0) - o.discount;
+    return {
+      ...p,
+      id,
+      version: o.version,
+      total_discount_money: cad(o.discount),
+      total_money: cad(total),
+      fulfillments: [{ uid: o.fulfillmentUid, type: "PICKUP", state: "PROPOSED", pickup_details: { pickup_at: o.pickupAt } }],
+    };
+  }
+
+  async retrieveLocation() {
+    this.calls.push("retrieveLocation");
+    this.maybeFail("retrieveLocation");
+    return { timezone: "America/Toronto", business_hours: { periods: this.businessHours } };
+  }
+  async searchCustomersByPhone(phone: string) {
+    this.calls.push("searchCustomersByPhone");
+    this.maybeFail("searchCustomersByPhone");
+    return this.customers.filter((c) => c.phone_number === phone);
+  }
+  async createCustomer({ givenName, phone }: { idempotencyKey: string; givenName: string; phone: string }) {
+    this.calls.push("createCustomer");
+    this.maybeFail("createCustomer");
+    const c = { id: `CUST${++this.seq}`, given_name: givenName, phone_number: phone, created_at: new Date().toISOString() };
+    this.customers.push(c);
+    return c;
+  }
+  async listCards(customerId: string) {
+    this.calls.push("listCards");
+    this.maybeFail("listCards");
+    return (this.cards.get(customerId) ?? []).filter((c) => c.enabled !== false);
+  }
+  async disableCard(cardId: string) {
+    this.calls.push(`disableCard:${cardId}`);
+    for (const list of this.cards.values()) for (const c of list) if (c.id === cardId) c.enabled = false;
+  }
+  async createOrder({ order }: { idempotencyKey: string; order: SquareOrderInput }) {
+    this.calls.push("createOrder");
+    this.maybeFail("createOrder");
+    const id = `SQORD${++this.seq}`;
+    const f = (order.fulfillments?.[0] ?? {}) as { pickup_details?: { pickup_at?: string } };
+    this.orders.set(id, { input: order, version: 1, pickupAt: f.pickup_details?.pickup_at, discount: 0, fulfillmentUid: `F${this.seq}` });
+    return this.priceStored(id);
+  }
+  async createPayment(a: { idempotencyKey: string; sourceId: string; customerId: string; orderId: string; amount: Money; locationId: string }) {
+    this.calls.push("createPayment");
+    this.maybeFail("createPayment");
+    const seen = this.paymentByKey.get(a.idempotencyKey);
+    if (seen) return seen;
+    const status = a.sourceId === "ccof:decline" ? "FAILED" : "COMPLETED";
+    const p = { id: `PAY${++this.seq}`, status, order_id: a.orderId, source_id: a.sourceId, amount: a.amount.amount, customer_id: a.customerId };
+    this.paymentByKey.set(a.idempotencyKey, p);
+    if (status === "COMPLETED") this.payments.push(p);
+    return p;
+  }
+  async createInvoice(a: { idempotencyKey: string; orderId: string; customerId: string; locationId: string; dueDate: string }) {
+    this.calls.push("createInvoice");
+    this.maybeFail("createInvoice");
+    const inv = { id: `inv:${++this.seq}`, version: 0, orderId: a.orderId, customerId: a.customerId, storeCard: true, order_id: a.orderId };
+    this.invoices.set(inv.id, inv);
+    return { id: inv.id, version: 0 };
+  }
+  async publishInvoice(id: string, version: number) {
+    this.calls.push(`publishInvoice:${id}`);
+    const inv = this.invoices.get(id)!;
+    inv.version = version + 1;
+    inv.status = "UNPAID";
+    inv.public_url = `https://squareupsandbox.com/pay-invoice/${id}`;
+    return { id, version: inv.version, status: inv.status, public_url: inv.public_url, order_id: inv.orderId };
+  }
+  async cancelInvoice(id: string) {
+    this.calls.push(`cancelInvoice:${id}`);
+    const inv = this.invoices.get(id);
+    if (inv) inv.canceled = true;
+  }
+  async updatePickupAt({ orderId, version, pickupAt }: { orderId: string; version: number; fulfillmentUid: string; pickupAt: Date }) {
+    this.calls.push(`updatePickupAt:${orderId}`);
+    this.maybeFail("updatePickupAt");
+    const o = this.orders.get(orderId);
+    if (!o || o.version !== version) throw new Error("version mismatch");
+    o.version++;
+    o.pickupAt = pickupAt.toISOString();
+    return this.priceStored(orderId);
+  }
+  async retrieveLoyaltyProgram() {
+    this.calls.push("retrieveLoyaltyProgram");
+    return this.loyalty.program;
+  }
+  async searchLoyaltyAccount(customerId: string) {
+    this.calls.push("searchLoyaltyAccount");
+    return this.loyalty.accounts.get(customerId) ?? null;
+  }
+  async accumulateLoyalty(a: { accountId: string; orderId: string; locationId: string; idempotencyKey: string }) {
+    this.calls.push("accumulateLoyalty");
+    if (!this.accumulated.some((x) => x.idempotencyKey === a.idempotencyKey)) this.accumulated.push(a);
+  }
+  async createLoyaltyReward(a: { accountId: string; rewardTierId: string; orderId: string; idempotencyKey: string }) {
+    this.calls.push("createLoyaltyReward");
+    this.rewards.push(a);
+    const o = this.orders.get(a.orderId);
+    if (o) {
+      o.discount += this.rewardDiscountCents;
+      o.version++;
+    }
   }
 }
 
