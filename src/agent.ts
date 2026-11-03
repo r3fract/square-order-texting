@@ -108,6 +108,12 @@ export const TOOLS: ModelRequest["tools"] = [
     input_schema: { type: "object", properties: {} },
   },
   {
+    name: "send_card_save_page",
+    description:
+      "Instead of send_checkout_link, when the customer said yes to one-word ordering next time: sends a Square page where they pay and can tick 'Save my card on file'.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
     name: "pay_with_saved_card",
     description:
       "Charge the customer's saved card for the cart you just read back, after they reply Y / yes. Only works right after a one-word-pay offer from set_cart. Code checks the cart and total; you never pass amounts.",
@@ -357,6 +363,8 @@ export async function runAgentTurn(deps: AgentDeps, conv: Conversation, customer
       const card = conv.savedCard;
       reply = `${reply ? reply + "\n\n" : ""}${checkoutQuote}\n\nCharged to ${card ? `${card.brand} ••${card.last4}` : "your saved card"}.`;
       paidSquareOrderId = checkout.squareOrderId;
+    } else if (checkout.checkoutKind === "invoice") {
+      reply = `${reply ? reply + "\n\n" : ""}${checkoutQuote}\n\nPay here, and tick "Save my card on file" for one-word ordering next time:\n${checkout.paymentLinkUrl}`;
     } else {
       reply = `${reply ? reply + "\n\n" : ""}${checkoutQuote}\n\nPay here (Apple Pay, Google Pay or card):\n${checkout.paymentLinkUrl}`;
     }
@@ -387,9 +395,13 @@ async function runTool(
         conv.pendingOneTap = null;
         return { result: `Cart saved but has problems. Fix or ask the customer:\n${q.problems.join("\n")}` };
       }
-      const offer = deps.orders.offerOneTap(conv, q.quote.totalCents)
+      let offer = deps.orders.offerOneTap(conv, q.quote.totalCents)
         ? `\nOffer one-word pay: end your read-back with "Pay with ${conv.savedCard!.brand} ••${conv.savedCard!.last4}? Reply Y." Don't send a link unless they ask.`
         : "";
+      if (!offer && deps.orders.shouldOfferCardSave(conv)) {
+        conv.cardOfferMadeAt = (deps.now ?? (() => new Date()))();
+        offer = `\nOnce, offer: "Want one-word ordering next time? I can send a Square page where you tick 'save my card'." If yes, call send_card_save_page instead of send_checkout_link.`;
+      }
       return { result: `Cart saved. Square's pricing:\n${q.quote.text}${offer}` };
     }
     case "set_pickup_details": {
@@ -414,6 +426,15 @@ async function runTool(
       if (!r.ok) return { result: `Link not created. Tell the customer: ${r.reason}` };
       return {
         result: `Link created for order #${r.order.orderNumber}, total ${formatMoney(r.order.totalCents, r.order.currency)}. The summary and link will be appended to your reply automatically.`,
+        checkout: { order: r.order, summary: r.quote.text },
+      };
+    }
+    case "send_card_save_page": {
+      if (conv.cart.length === 0) return { result: "Can't send a page: the cart is empty." };
+      const r = await deps.orders.checkoutWithInvoice(conv);
+      if (!r.ok) return { result: `Page not created. Tell the customer: ${r.reason}` };
+      return {
+        result: `Square page created for order #${r.order.orderNumber}, total ${formatMoney(r.order.totalCents, r.order.currency)}. The summary and page are appended for you.`,
         checkout: { order: r.order, summary: r.quote.text },
       };
     }

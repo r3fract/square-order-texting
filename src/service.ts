@@ -77,6 +77,8 @@ export class TextOrderService {
       pickup: (conv) => this.resolve(conv.pickupTarget ?? { kind: "asap" }),
       allowTipping: d.config.ALLOW_TIPPING,
       oneTapMaxCents: d.config.ONE_TAP_MAX_CENTS,
+      timeZone: d.config.TIMEZONE,
+      ensureCustomer: (conv) => this.customers.ensureProfile(conv, `customer:${conv.phone}`),
       now: () => this.now(),
       isAcceptingOrders: async () => {
         const s = await this.orderingStatus();
@@ -364,6 +366,11 @@ export class TextOrderService {
     if (event.type === "payment.created" || event.type === "payment.updated") {
       const p = obj.payment;
       if (p?.status === "COMPLETED" && p.order_id) await this.onPaid(p.order_id);
+      return;
+    }
+    if (event.type === "invoice.payment_made") {
+      const orderId = obj.invoice?.order_id;
+      if (orderId) await this.onPaid(orderId);
       return;
     }
     if (event.type === "order.fulfillment.updated") {

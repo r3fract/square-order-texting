@@ -154,6 +154,9 @@ export interface OrderServiceDeps {
   pickup: (conv: Conversation) => ResolvedPickup;
   allowTipping?: boolean;
   oneTapMaxCents: number;
+  timeZone: string;
+  /** Finds or creates the Square customer profile for this phone (invoices need one). */
+  ensureCustomer: (conv: Conversation) => Promise<string>;
   isAcceptingOrders: () => Promise<{ ok: true } | { ok: false; reason: string }>;
   now?: () => Date;
 }
@@ -397,6 +400,82 @@ export class OrderService {
     return null;
   }
 
+  /** Offer the save-my-card page once, to customers Square knows who have no saved card yet. */
+  shouldOfferCardSave(conv: Conversation): boolean {
+    return !!(conv.squareCustomerId && !conv.savedCard && !conv.customerAmbiguous && !conv.cardOfferMadeAt);
+  }
+
+  /**
+   * Checkout through a Square invoice with "Save my card on file" turned on: same rules as a payment link, but the
+   * customer can save their card on Square's own page for one-word ordering next time.
+   */
+  async checkoutWithInvoice(conv: Conversation): Promise<CheckoutResult> {
+    const gate = await this.d.isAcceptingOrders();
+    if (!gate.ok) return gate;
+    const pickup = this.d.pickup(conv);
+    if (!pickup.ok) return { ok: false, reason: pickup.reason };
+    const full = await this.slotFull(pickup);
+    if (full) return { ok: false, reason: full };
+    const menu = await this.d.menus.getMenu(true);
+    const stock = await this.d.menus.getStock(menu, conv.cart.map((l) => l.variationId));
+    const problems = validateCart(menu, stock, conv.cart);
+    if (problems.length) return { ok: false, reason: problems.map((p) => p.message).join(" ") };
+
+    const customerId = await this.d.ensureCustomer(conv);
+    await this.retireAwaiting(conv.phone, "replaced");
+
+    const recordId = randomUUID();
+    const orderNumber = await this.d.store.nextOrderNumber();
+    const sqOrder = await this.d.square.createOrder({
+      idempotencyKey: `order:${recordId}`,
+      order: buildSquareOrder({
+        locationId: this.d.locationId,
+        cart: conv.cart,
+        conv,
+        orderNumber,
+        pickupAt: pickup.pickupAt,
+        pickupLabel: pickup.label,
+        ...(pickup.pickupAt ? { pickupPrepMinutes: this.d.prepMinutes } : {}),
+      }),
+    });
+    const quote = quoteFromOrder(sqOrder);
+    const dueDate = this.nowDate().toLocaleDateString("en-CA", { timeZone: this.d.timeZone });
+    const draft = await this.d.square.createInvoice({ idempotencyKey: `invoice:${recordId}`, orderId: sqOrder.id!, customerId, locationId: this.d.locationId, dueDate });
+    const inv = await this.d.square.publishInvoice(draft.id, draft.version, `publish:${recordId}`);
+    try {
+      const record: OrderRecord = {
+        id: recordId,
+        phone: conv.phone,
+        orderNumber,
+        squareOrderId: sqOrder.id!,
+        paymentLinkId: null,
+        paymentLinkUrl: inv.public_url ?? null,
+        checkoutKind: "invoice",
+        invoiceId: inv.id,
+        invoiceVersion: inv.version,
+        squarePaymentId: null,
+        customerId,
+        cart: conv.cart,
+        pickupAt: pickup.pickupAt,
+        pickupSlot: pickup.slotKey,
+        quotedReadyAt: pickup.pickupAt,
+        etaNotifiedAt: null,
+        totalCents: quote.totalCents,
+        currency: quote.currency,
+        summary: quote.text,
+        status: "awaiting_payment",
+        createdAt: this.nowDate(),
+        paidAt: null,
+        readyAt: null,
+      };
+      await this.d.store.createOrder(record);
+      return { ok: true, order: record, quote };
+    } catch (err) {
+      await this.d.square.cancelInvoice(inv.id, inv.version).catch(() => {}); // never leave a payable page we have no record of
+      throw err;
+    }
+  }
+
   /** Deletes the unpaid payment link (if any) so a stale total can't be paid. */
   async retireAwaiting(phone: string, status: "replaced" | "expired" | "canceled"): Promise<OrderRecord | null> {
     const existing = await this.d.store.getAwaitingOrderForPhone(phone);
@@ -406,7 +485,9 @@ export class OrderService {
 
   /** Deletes the link first, then marks the order, only if it's still unpaid (a payment may land at the same moment). */
   async retire(order: OrderRecord, status: "replaced" | "expired" | "canceled"): Promise<OrderRecord | null> {
-    if (order.paymentLinkId) await this.d.square.deletePaymentLink(order.paymentLinkId);
+    if (order.checkoutKind === "invoice" && order.invoiceId) await this.d.square.cancelInvoice(order.invoiceId, order.invoiceVersion ?? 0);
+    else if (order.checkoutKind === "link" && order.paymentLinkId) await this.d.square.deletePaymentLink(order.paymentLinkId);
+    // card_on_file: nothing payable to take down
     return this.d.store.transitionOrder(order.id, ["awaiting_payment"], { status });
   }
 }
