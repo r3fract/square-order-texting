@@ -39,6 +39,12 @@ async function main() {
   const menu = await service.menus.getMenu(true);
   console.log(`Loaded ${menu.items.length} menu items from Square (${config.SQUARE_ENV}).`);
 
+  if (!(await service.hours())) {
+    const msg = "⚠️ Text ordering is closed: no business hours are set in Square. Set them in Square Dashboard → Locations.";
+    console.warn(msg);
+    await sms.send(config.OWNER_PHONE, msg).catch((err) => console.error("couldn't text owner", err));
+  }
+
   const sweeper = setInterval(() => {
     service.expireStaleLinks().catch((err) => console.error("expire sweep failed", err));
   }, 60_000);

@@ -3,7 +3,7 @@ import { z } from "zod";
 /**
  * All settings come from environment variables (see .env.example).
  * Ordering hours use 24h "HH:MM-HH:MM" per weekday, e.g. "mon=17:00-22:30,sat=11:00-22:30".
- * Days not listed are closed. Leave ORDERING_HOURS empty to allow ordering any time.
+ * Days not listed are closed. Leave ORDERING_HOURS empty to use the Square location's business hours (none set = closed).
  */
 const Env = z.object({
   PORT: z.coerce.number().default(3000),

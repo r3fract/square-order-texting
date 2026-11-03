@@ -365,6 +365,7 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
     ANTHROPIC_API_KEY: "sk-test",
     ADMIN_TOKEN: "admin-token-1234567890",
     TIMEZONE: "America/Toronto",
+    ORDERING_HOURS: "sun=00:00-23:59,mon=00:00-23:59,tue=00:00-23:59,wed=00:00-23:59,thu=00:00-23:59,fri=00:00-23:59,sat=00:00-23:59",
     ...overrides,
   });
 }

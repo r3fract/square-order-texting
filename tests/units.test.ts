@@ -42,8 +42,8 @@ describe("ordering hours", () => {
     expect(nextOpeningText(hours, at("2026-11-04T04:00:00Z"), tz)).toBe("Text ordering opens Saturday at 6pm.");
     expect(describeHours(hours)).toBe("Tuesday 5pm-10:30pm, Saturday 6pm-1am");
   });
-  it("empty hours means always open", () => {
-    expect(isOpen(parseHours(""), new Date(), tz)).toBe(true);
+  it("empty hours means closed", () => {
+    expect(isOpen(parseHours(""), new Date(), tz)).toBe(false);
   });
   it("rejects badly written hours", () => {
     expect(() => parseHours("tuesday 5-10")).toThrow(/ORDERING_HOURS/);

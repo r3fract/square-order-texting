@@ -1,6 +1,7 @@
 import { runAgentTurn, type AgentDeps, type ModelClient } from "./agent.js";
 import type { Config } from "./config.js";
 import { describeHours, isOpen, keyword, nextOpeningText, normalizePhone, redactCardNumbers } from "./guards.js";
+import { HoursService } from "./hours.js";
 import { OrderService } from "./orders.js";
 import type { SquareApi } from "./square/client.js";
 import { formatMoney, MenuService } from "./square/menu.js";
@@ -25,6 +26,7 @@ export interface ServiceDeps {
 export class TextOrderService {
   readonly menus: MenuService;
   readonly orders: OrderService;
+  readonly hoursService: HoursService;
   private locks = new Map<string, Promise<unknown>>();
   private now: () => Date;
   private log: (msg: string, extra?: unknown) => void;
@@ -33,6 +35,7 @@ export class TextOrderService {
     this.now = d.now ?? (() => new Date());
     this.log = d.log ?? ((m, e) => console.log(m, e ?? ""));
     this.menus = new MenuService(d.square, d.config.SQUARE_LOCATION_ID);
+    this.hoursService = new HoursService(d.square, d.config.hours);
     this.orders = new OrderService({
       square: d.square,
       menus: this.menus,
@@ -64,10 +67,17 @@ export class TextOrderService {
     if ((await this.d.store.getSetting("paused")) === "true") {
       return { open: false, message: "Text ordering is paused right now. Please order at the window." };
     }
-    if (!isOpen(config.hours, this.now(), config.TIMEZONE)) {
-      return { open: false, message: `Text ordering is closed right now. ${nextOpeningText(config.hours, this.now(), config.TIMEZONE)}`.trim() };
+    const hours = await this.hours();
+    if (!hours) return { open: false, message: "Text ordering isn't open right now. Please order at the window." };
+    if (!isOpen(hours, this.now(), config.TIMEZONE)) {
+      return { open: false, message: `Text ordering is closed right now. ${nextOpeningText(hours, this.now(), config.TIMEZONE)}`.trim() };
     }
     return { open: true, message: "Text ordering is open." };
+  }
+
+  /** Ordering hours right now: the ORDERING_HOURS override, else Square business hours. */
+  hours() {
+    return this.hoursService.current();
   }
 
   private async save(conv: Conversation) {
@@ -163,7 +173,7 @@ export class TextOrderService {
       businessName: config.BUSINESS_NAME,
       pickupInstructions: config.PICKUP_INSTRUCTIONS,
       orderingStatus: () => this.orderingStatus(),
-      hoursText: describeHours(config.hours),
+      hoursText: describeHours(await this.hours()),
       handoff: (c, reason) => this.startHandoff(c, reason),
       now: this.now,
       timeZone: config.TIMEZONE,

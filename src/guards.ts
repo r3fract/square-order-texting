@@ -27,9 +27,9 @@ function fmtTime(min: number): string {
   return m === 0 ? `${h12}${ampm}` : `${h12}:${String(m).padStart(2, "0")}${ampm}`;
 }
 
-/** Windows may run past midnight (e.g. 18:00-01:00). */
+/** Windows may run past midnight (e.g. 18:00-01:00). No hours set means closed. */
 export function isOpen(hours: OrderingHours, now: Date, timeZone: string): boolean {
-  if (!hours) return true;
+  if (!hours) return false;
   const { day, minutes } = localTime(now, timeZone);
   const today = hours[day];
   if (today) {
@@ -57,7 +57,7 @@ export function nextOpeningText(hours: OrderingHours, now: Date, timeZone: strin
 }
 
 export function describeHours(hours: OrderingHours): string {
-  if (!hours) return "any time";
+  if (!hours) return "not set";
   return DAYS.filter((d) => hours[d])
     .map((d) => `${DAY_NAMES[d]} ${fmtTime(hours[d]!.open)}-${fmtTime(hours[d]!.close)}`)
     .join(", ");
