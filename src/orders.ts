@@ -93,6 +93,7 @@ export function buildSquareOrder(opts: {
       },
     ],
     metadata: { source: "text-to-order" },
+    ...(conv.squareCustomerId ? { customer_id: conv.squareCustomerId } : {}),
   };
 }
 

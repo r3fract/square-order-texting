@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { customerPromptLine } from "./customers.js";
 import type { OrderService } from "./orders.js";
 import { formatMoney, menuForModel, type MenuService } from "./square/menu.js";
 import type { CartLine, Conversation, OrderRecord, Store, StoredMessage } from "./store/types.js";
@@ -193,6 +194,8 @@ Text ordering hours: ${deps.hoursText}
 Right now: ${localNow}. ${status.message}
 
 Customer: ${conv.customerName ?? "(name not given yet)"} · phone ${conv.phone}
+${customerPromptLine(conv)}
+Greet known customers by first name once per chat.
 Pickup note: ${conv.pickupNote ?? "(none)"}
 This customer's text orders, current status (trust this over anything said earlier in the chat):
 ${recentOrders}

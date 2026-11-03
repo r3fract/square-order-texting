@@ -1,6 +1,7 @@
 import { runAgentTurn, type AgentDeps, type ModelClient } from "./agent.js";
 import type { Config } from "./config.js";
 import { describeHours, isOpen, keyword, nextOpeningText, normalizePhone, redactCardNumbers } from "./guards.js";
+import { CustomerService } from "./customers.js";
 import { HoursService } from "./hours.js";
 import { OrderService } from "./orders.js";
 import type { SquareApi } from "./square/client.js";
@@ -27,6 +28,7 @@ export class TextOrderService {
   readonly menus: MenuService;
   readonly orders: OrderService;
   readonly hoursService: HoursService;
+  readonly customers: CustomerService;
   private locks = new Map<string, Promise<unknown>>();
   private now: () => Date;
   private log: (msg: string, extra?: unknown) => void;
@@ -36,6 +38,7 @@ export class TextOrderService {
     this.log = d.log ?? ((m, e) => console.log(m, e ?? ""));
     this.menus = new MenuService(d.square, d.config.SQUARE_LOCATION_ID);
     this.hoursService = new HoursService(d.square, d.config.hours);
+    this.customers = new CustomerService(d.square, () => this.now(), (m, e) => this.log(m, e));
     this.orders = new OrderService({
       square: d.square,
       menus: this.menus,
@@ -179,6 +182,8 @@ export class TextOrderService {
       timeZone: config.TIMEZONE,
     };
 
+    await this.customers.refresh(conv);
+
     let reply: string;
     try {
       const modelInput = hadCard ? `${body}\n\n(System note: the customer texted what looked like a card number; it was removed. Remind them never to text card details.)` : body;
@@ -321,6 +326,10 @@ export class TextOrderService {
     await this.withLock(order.phone, async () => {
       const conv = await this.d.store.getConversation(order.phone);
       conv.cart = [];
+      if (!conv.squareCustomerId && !conv.customerAmbiguous) {
+        await this.customers.ensureProfile(conv, `customer:${order.id}`).catch((err) => this.log("couldn't create Square customer", err));
+      }
+      conv.customerLookupAt = null; // pick up a newly saved card on the next text
       appendNote(conv, `(system: payment received for order #${order.orderNumber})`, `Paid. Order #${order.orderNumber} sent to the kitchen.`);
       await this.save(conv);
     });
