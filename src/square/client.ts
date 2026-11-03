@@ -115,6 +115,9 @@ export interface SquareCard {
   card_brand?: string;
   last_4?: string;
   enabled?: boolean;
+  /** Same physical card saved twice → same fingerprint. */
+  fingerprint?: string;
+  created_at?: string;
 }
 export interface SquarePayment {
   id: string;

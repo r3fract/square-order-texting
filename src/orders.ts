@@ -2,13 +2,15 @@ import { createHash, randomUUID } from "node:crypto";
 import { SquareError, type SquareApi, type SquareOrder, type SquareOrderInput } from "./square/client.js";
 import { formatMoney, variationAvailable, type Menu, type MenuService } from "./square/menu.js";
 import type { ResolvedPickup } from "./pickup.js";
-import type { CartLine, Conversation, OrderRecord, Store } from "./store/types.js";
+import type { CartLine, Conversation, OrderRecord, SavedCard, Store } from "./store/types.js";
 
 export const MAX_QTY_PER_LINE = 25;
 const ONE_TAP_WINDOW_MS = 10 * 60_000;
 const DAY_MS = 24 * 60 * 60_000;
 /** The only replies that count as "yes, charge my card". Checked in code, not left to the AI. */
 const AFFIRMATIVE = /^\s*(y|yes|yep|yup|yeah)\s*[.!]*\s*$/i;
+/** A reply that picks a card from the numbered list. */
+const CARD_NUMBER = /^\s*#?([1-9])\s*[.!]*\s*$/;
 /** Square error codes that mean the card was declined (safe to offer a link instead). Anything else: outcome unknown. */
 const DECLINE_CODES = new Set([
   "CARD_DECLINED", "GENERIC_DECLINE", "INSUFFICIENT_FUNDS", "CVV_FAILURE", "ADDRESS_VERIFICATION_FAILURE", "CARD_EXPIRED",
@@ -187,7 +189,16 @@ export type CheckoutResult =
   | { ok: true; order: OrderRecord; quote: Quote }
   | { ok: false; reason: string };
 
-export type CardPayResult = CheckoutResult | { ok: false; reason: string; fallbackToLink: true };
+export type CardPayResult =
+  | { ok: true; order: OrderRecord; quote: Quote; card: SavedCard }
+  | { ok: false; reason: string }
+  | { ok: false; reason: string; fallbackToLink: true };
+
+/** "1 or 2", "1, 2 or 3" */
+export function numberChoices(n: number): string {
+  const nums = Array.from({ length: n }, (_, i) => String(i + 1));
+  return nums.length === 1 ? "1" : `${nums.slice(0, -1).join(", ")} or ${nums.at(-1)}`;
+}
 
 export class OrderService {
   constructor(private d: OrderServiceDeps) {}
@@ -309,7 +320,8 @@ export class OrderService {
       conv.pendingOneTap = null;
       return false;
     }
-    conv.pendingOneTap = { cartHash: cartHash(conv.cart), totalCents, offeredAt: this.nowDate(), ...(turnId ? { turnId } : {}) };
+    const cardIds = (conv.savedCards?.length ? conv.savedCards : [conv.savedCard!]).map((c) => c.id);
+    conv.pendingOneTap = { cartHash: cartHash(conv.cart), totalCents, offeredAt: this.nowDate(), cardIds, ...(turnId ? { turnId } : {}) };
     return true;
   }
 
@@ -321,9 +333,23 @@ export class OrderService {
     const now = this.nowDate();
     if (await this.unconfirmedCardOrder(conv.phone)) return { ok: false, reason: OrderService.STILL_CONFIRMING };
     const p = conv.pendingOneTap;
-    // Consent: a plain yes, in a text that arrived after the offer was actually sent (not one queued behind it).
-    if (p && (!AFFIRMATIVE.test(consent.text) || p.turnId === consent.turnId || p.shownAfterSeq == null || consent.seq <= p.shownAfterSeq)) {
-      return { ok: false, reason: "Wait for them to reply Y to your offer before calling pay_with_saved_card." };
+    // Consent: a plain yes (one card) or a number from the list, in a text that arrived after the offer was sent.
+    let chosenId: string | undefined;
+    if (p) {
+      const listed = p.cardIds?.length ? p.cardIds : conv.savedCard ? [conv.savedCard.id] : [];
+      const num = consent.text.match(CARD_NUMBER)?.[1];
+      const fresh = p.turnId !== consent.turnId && p.shownAfterSeq != null && consent.seq > p.shownAfterSeq;
+      if (!fresh || (!num && !AFFIRMATIVE.test(consent.text))) {
+        return { ok: false, reason: "Wait for them to reply Y (or a card number) to your offer before calling pay_with_saved_card." };
+      }
+      if (num) {
+        chosenId = listed[Number(num) - 1];
+        if (!chosenId) return { ok: false, reason: `That number isn't on the list. Ask them to reply ${numberChoices(listed.length)}.` };
+      } else if (listed.length > 1) {
+        return { ok: false, reason: `Ask which card: reply ${numberChoices(listed.length)}.` };
+      } else {
+        chosenId = listed[0];
+      }
     }
     if (!p) {
       const recent = (await this.d.store.listOrders(50)).find(
@@ -341,9 +367,9 @@ export class OrderService {
       conv.pendingOneTap = null;
       return { ok: false, reason: "That offer expired. Call set_cart, read the order back and offer again." };
     }
-    const offeredCardId = conv.savedCard?.id;
     await this.d.refreshCustomer(conv); // the card or profile may have changed in Square since the offer
-    if (!conv.savedCard || conv.savedCard.id !== offeredCardId) {
+    const card = (conv.savedCards?.length ? conv.savedCards : conv.savedCard ? [conv.savedCard] : []).find((c) => c.id === chosenId);
+    if (!card) {
       conv.pendingOneTap = null;
       return { ok: false, reason: "The saved card isn't available anymore. Send the payment link instead." };
     }
@@ -406,6 +432,7 @@ export class OrderService {
         squareOrderId: sqOrder.id!,
         recordId,
         orderNumber,
+        cardIds: p.cardIds ?? [card.id],
         ...(rewardId ? { rewardId } : {}),
       };
       return { ok: false, reason: `The total is now ${formatMoney(quote.totalCents, quote.currency)}. Read that out and ask them to reply Y again to pay it.` };
@@ -444,7 +471,7 @@ export class OrderService {
     try {
       payment = await this.d.square.createPayment({
         idempotencyKey: `card:${recordId}`,
-        sourceId: conv.savedCard!.id,
+        sourceId: card.id,
         customerId: conv.squareCustomerId!,
         orderId: sqOrder.id!,
         amount: { amount: quote.totalCents, currency: quote.currency },
@@ -473,7 +500,7 @@ export class OrderService {
     await this.d.store.updateOrder(record.id, { squarePaymentId: payment.id });
     record.squarePaymentId = payment.id;
     conv.pendingRewardTierId = null;
-    return { ok: true, order: record, quote };
+    return { ok: true, order: record, quote, card };
   }
 
   /** Null if the pickup slot has room, else the reason to tell the customer. */

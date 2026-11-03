@@ -16,6 +16,8 @@ export interface SavedCard {
   id: string;
   brand: string;
   last4: string;
+  /** Older copies of the same card (same Square fingerprint), removed together with it. */
+  otherIds?: string[];
 }
 
 export interface PendingOneTap {
@@ -30,6 +32,8 @@ export interface PendingOneTap {
   orderNumber?: number;
   /** Loyalty reward attached to that reused Square order (released if the offer is abandoned). */
   rewardId?: string;
+  /** Card ids in the order they were numbered in the offer (1 = first). */
+  cardIds?: string[];
   /** Arrival sequence of the newest inbound text when the offer was sent: only a later text can say Y to it. */
   shownAfterSeq?: number;
 }
@@ -49,7 +53,9 @@ export interface Conversation {
   squareCustomerId: string | null;
   customerAmbiguous: boolean; // phone matches several Square profiles: no card features
   customerLookupAt: Date | null;
-  savedCard: SavedCard | null;
+  savedCard: SavedCard | null; // the newest saved card (savedCards[0])
+  /** Distinct saved cards, newest first, max 3: the numbered list in the one-word-pay offer. */
+  savedCards: SavedCard[];
   pendingOneTap: PendingOneTap | null;
   cardOfferMadeAt: Date | null;
   pickupTarget: PickupTarget | null;
@@ -134,6 +140,7 @@ export function newConversation(phone: string): Conversation {
     customerAmbiguous: false,
     customerLookupAt: null,
     savedCard: null,
+    savedCards: [],
     pendingOneTap: null,
     cardOfferMadeAt: null,
     pickupTarget: null,

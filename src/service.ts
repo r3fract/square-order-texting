@@ -255,11 +255,12 @@ export class TextOrderService {
       gameSummary: () => this.game?.describe(config.TIMEZONE) ?? "No game clock (feed not set up).",
       resolvePickup: (t) => this.resolve(t),
       inbound: { text: body, turnId: messageSid, seq },
-      onCharged: (order, summary) => (charged = { order, summary }),
+      onCharged: (order, summary, card) => (charged = { order, summary, card }),
       loyalty: this.loyalty,
-      forgetCard: async (c) => {
-        await this.d.square.disableCard(c.savedCard!.id);
-        c.savedCard = null;
+      forgetCard: async (c, card) => {
+        for (const id of [card.id, ...(card.otherIds ?? [])]) await this.d.square.disableCard(id);
+        c.savedCards = (c.savedCards ?? []).filter((x) => x.id !== card.id);
+        c.savedCard = c.savedCards[0] ?? null;
         c.pendingOneTap = null;
       },
     };
@@ -268,7 +269,7 @@ export class TextOrderService {
 
     let reply: string;
     let paidSquareOrderId: string | undefined;
-    let charged: { order: OrderRecord; summary: string } | null = null;
+    let charged: { order: OrderRecord; summary: string; card: string } | null = null;
     let offerShown = false;
     try {
       const modelInput = hadCard ? `${body}\n\n(System note: the customer texted what looked like a card number; it was removed. Remind them never to text card details.)` : body;
@@ -278,11 +279,10 @@ export class TextOrderService {
       offerShown = !!turn.offerShown;
     } catch (err) {
       this.log("agent turn failed", err);
-      const c = charged as { order: OrderRecord; summary: string } | null;
+      const c = charged as { order: OrderRecord; summary: string; card: string } | null;
       if (c) {
         // The card was charged before the AI failed: never tell them to try again.
-        const card = conv.savedCard ? `${conv.savedCard.brand} ••${conv.savedCard.last4}` : "your saved card";
-        reply = `${c.summary}\n\nCharged to ${card}. Order #${c.order.orderNumber}.`;
+        reply = `${c.summary}\n\nCharged to ${c.card}. Order #${c.order.orderNumber}.`;
         paidSquareOrderId = c.order.squareOrderId;
       } else {
         reply = "Sorry, something went wrong on our end. Please try again in a minute, or order at the window.";

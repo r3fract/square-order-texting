@@ -321,6 +321,77 @@ describe("one-word pay with a saved card", () => {
     expect(t.sms.last(PHONE)).toContain("Total $10.17. Pay with VISA ••1111? Reply Y.");
   });
 
+  describe("several saved cards", () => {
+    function multi() {
+      const t = setup();
+      t.square.cards.set("C1", [
+        { id: "ccof:old", card_brand: "VISA", last_4: "5858", enabled: true, fingerprint: "fp-5858", created_at: "2026-01-01T00:00:00Z" },
+        { id: "ccof:dup", card_brand: "VISA", last_4: "5858", enabled: true, fingerprint: "fp-5858", created_at: "2026-02-01T00:00:00Z" },
+        { id: "ccof:new", card_brand: "VISA", last_4: "1111", enabled: true, fingerprint: "fp-1111", created_at: "2026-11-03T18:12:00Z" },
+      ]);
+      return t;
+    }
+
+    it("lists them numbered, newest first, duplicates once", async () => {
+      const t = multi();
+      t.model.push(tool("set_cart", LINES), say("A poutine."));
+      await t.text("a poutine please");
+      expect(t.sms.last(PHONE)).toContain("Total $10.17. Which card?\n1. VISA ••1111\n2. VISA ••5858\nReply 1 or 2.");
+    });
+
+    it("replying a number pays with that card", async () => {
+      const t = multi();
+      t.model.push(tool("set_cart", LINES), say("A poutine."));
+      await t.text("a poutine please");
+      t.model.push(tool("pay_with_saved_card"), say("Done"));
+      await t.text("2");
+      expect(t.square.payments).toHaveLength(1);
+      expect(t.square.payments[0]!.source_id).toBe("ccof:dup"); // newest of the two identical 5858 cards
+      expect(t.sms.to(PHONE).at(-2)).toContain("Charged to VISA ••5858.");
+    });
+
+    it("a plain Y with several cards asks which one instead of guessing", async () => {
+      const t = multi();
+      t.model.push(tool("set_cart", LINES), say("A poutine."));
+      await t.text("a poutine please");
+      t.model.push(tool("pay_with_saved_card"), say("Which card?"));
+      await t.text("Y");
+      expect(t.square.payments).toHaveLength(0);
+      expect(t.lastToolResult()).toContain("Ask which card: reply 1 or 2.");
+    });
+
+    it("a number that isn't on the list doesn't pay", async () => {
+      const t = multi();
+      t.model.push(tool("set_cart", LINES), say("A poutine."));
+      await t.text("a poutine please");
+      t.model.push(tool("pay_with_saved_card"), say("Hmm"));
+      await t.text("3");
+      expect(t.square.payments).toHaveLength(0);
+    });
+
+    it("with one card, replying 1 also works", async () => {
+      const t = setup();
+      await offer(t);
+      t.model.push(tool("pay_with_saved_card"), say("Done"));
+      await t.text("1");
+      expect(t.square.payments).toHaveLength(1);
+    });
+
+    it("forget my card asks which, then removes that one", async () => {
+      const t = multi();
+      t.model.push(say("hi"));
+      await t.text("hi");
+      t.model.push(tool("forget_saved_card"), say("Which?"));
+      await t.text("forget my card");
+      expect(t.lastToolResult()).toContain("Ask which card to remove");
+      t.model.push(tool("forget_saved_card", { card: 2 }), say("Done"));
+      await t.text("the 5858 one, number 2");
+      expect(t.square.calls).toContain("disableCard:ccof:dup");
+      expect(t.square.calls).toContain("disableCard:ccof:old"); // its duplicate goes too
+      expect((await t.store.getConversation(PHONE)).savedCards.map((c) => c.last4)).toEqual(["1111"]);
+    });
+  });
+
   it("two profiles on one phone never get one-word pay", async () => {
     const t = setup();
     t.square.customers.push({ id: "C2", given_name: "Other", phone_number: PHONE });

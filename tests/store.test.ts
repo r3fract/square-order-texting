@@ -31,6 +31,7 @@ function storeSuite(name: string, make: () => Promise<Store>, done?: (s: Store) 
       conv.customerAmbiguous = true;
       conv.customerLookupAt = new Date("2026-11-03T20:00:00Z");
       conv.savedCard = { id: "ccof:1", brand: "VISA", last4: "1111" };
+      conv.savedCards = [conv.savedCard, { id: "ccof:2", brand: "VISA", last4: "5858", otherIds: ["ccof:3"] }];
       conv.pendingOneTap = { cartHash: "abc", totalCents: 875, offeredAt: new Date("2026-11-03T20:01:00Z") };
       conv.cardOfferMadeAt = new Date("2026-11-03T20:02:00Z");
       conv.pickupTarget = { kind: "intermission", n: 2 };

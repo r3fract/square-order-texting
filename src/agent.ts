@@ -1,9 +1,9 @@
 import { z } from "zod";
-import { cleanName, customerPromptLine } from "./customers.js";
-import type { OrderService } from "./orders.js";
+import { cardLabel, cleanName, customerPromptLine } from "./customers.js";
+import { numberChoices, type OrderService } from "./orders.js";
 import { shortTime, targetFromTool, type ResolvedPickup } from "./pickup.js";
 import { formatMoney, menuForModel, type MenuService } from "./square/menu.js";
-import type { CartLine, Conversation, OrderRecord, PickupTarget, Store, StoredMessage } from "./store/types.js";
+import type { CartLine, Conversation, OrderRecord, PickupTarget, SavedCard, Store, StoredMessage } from "./store/types.js";
 
 /* ---------- minimal model interface (the real one wraps @anthropic-ai/sdk; tests use a fake) ---------- */
 
@@ -131,8 +131,8 @@ export const TOOLS: ModelRequest["tools"] = [
   },
   {
     name: "forget_saved_card",
-    description: "Remove the customer's saved card when they ask (e.g. 'forget my card').",
-    input_schema: { type: "object", properties: {} },
+    description: "Remove a saved card when they ask (e.g. 'forget my card'). With several cards, pass the number they picked.",
+    input_schema: { type: "object", properties: { card: { type: "integer", description: "Card number from the list (1 = first)" } } },
   },
   {
     name: "cancel_order",
@@ -174,11 +174,11 @@ export interface AgentDeps {
   /** Square Loyalty (null when the seller doesn't use it). */
   loyalty: { affordableTier: (balance: number) => Promise<{ id: string; name: string; points: number } | null> } | null;
   /** Disables the customer's saved card in Square. */
-  forgetCard: (conv: Conversation) => Promise<void>;
+  forgetCard: (conv: Conversation, card: SavedCard) => Promise<void>;
   /** The customer's own text this turn and when it arrived: charging checks consent against these, not the AI. */
   inbound: { text: string; turnId: string; seq: number };
   /** Told the moment a saved card is charged, so the service can confirm it even if the AI fails afterwards. */
-  onCharged?: (order: OrderRecord, summary: string) => void;
+  onCharged?: (order: OrderRecord, summary: string, cardLabel: string) => void;
 }
 
 export interface AgentTurnResult {
@@ -258,7 +258,7 @@ How to take an order:
 
 Game: ${deps.gameSummary()}
 When they say end of a period, intermission, after the game or a time, call set_pickup_time. Never work out times yourself.
-If you offered one-word pay and they reply Y / yes / yep, call pay_with_saved_card. Anything else about the order means re-read and re-offer.
+If you offered one-word pay and they reply Y / yes / yep or a card number from the list, call pay_with_saved_card. Anything else about the order means re-read and re-offer.
 Pickup: ${deps.pickupInstructions}
 Text ordering hours: ${deps.hoursText}
 Right now: ${localNow}. ${status.message}
@@ -320,6 +320,7 @@ export async function runAgentTurn(deps: AgentDeps, conv: Conversation, customer
   let checkout: OrderRecord | undefined;
   let checkoutQuote: string | undefined;
   let declinedFirst = false;
+  let chargedCard: string | undefined;
   const texts: string[] = [];
   const sourceText: string[] = []; // where verified prices can come from: the live menu and tool results
 
@@ -348,6 +349,7 @@ export async function runAgentTurn(deps: AgentDeps, conv: Conversation, customer
           checkout = out.checkout.order;
           checkoutQuote = out.checkout.summary;
           declinedFirst ||= !!out.checkout.declinedFirst;
+          chargedCard = out.checkout.cardLabel ?? chargedCard;
         }
         results.push({ type: "tool_result", tool_use_id: tu.id, content: out.result });
       } catch (err) {
@@ -383,8 +385,7 @@ export async function runAgentTurn(deps: AgentDeps, conv: Conversation, customer
   let paidSquareOrderId: string | undefined;
   if (checkout && checkoutQuote) {
     if (checkout.checkoutKind === "card_on_file") {
-      const card = conv.savedCard;
-      reply = `${reply ? reply + "\n\n" : ""}${checkoutQuote}\n\nCharged to ${card ? `${card.brand} ••${card.last4}` : "your saved card"}.`;
+      reply = `${reply ? reply + "\n\n" : ""}${checkoutQuote}\n\nCharged to ${chargedCard ?? "your saved card"}.`;
       paidSquareOrderId = checkout.squareOrderId;
     } else if (checkout.checkoutKind === "invoice") {
       reply = `${reply ? reply + "\n\n" : ""}${checkoutQuote}\n\nPay here, and tick "Save my card on file" for one-word ordering next time:\n${checkout.paymentLinkUrl}`;
@@ -398,8 +399,12 @@ export async function runAgentTurn(deps: AgentDeps, conv: Conversation, customer
   // wrong card or total), so the card and Square's total are what they say yes to.
   const p = conv.pendingOneTap;
   let offerShown = false;
-  if (!checkout && p && p.turnId === deps.inbound.turnId && conv.savedCard) {
-    reply = `${reply}\n\nTotal ${formatMoney(p.totalCents)}. Pay with ${conv.savedCard.brand} ••${conv.savedCard.last4}? Reply Y.`;
+  const offered = (p?.cardIds ?? []).map((id) => conv.savedCards.find((c) => c.id === id)).filter((c): c is SavedCard => !!c);
+  if (!checkout && p && p.turnId === deps.inbound.turnId && offered.length) {
+    reply =
+      offered.length === 1
+        ? `${reply}\n\nTotal ${formatMoney(p.totalCents)}. Pay with ${cardLabel(offered[0]!)}? Reply Y.`
+        : `${reply}\n\nTotal ${formatMoney(p.totalCents)}. Which card?\n${offered.map((c, i) => `${i + 1}. ${cardLabel(c)}`).join("\n")}\nReply ${numberChoices(offered.length)}.`;
     offerShown = true;
   }
   return { reply, checkout, offerShown, ...(paidSquareOrderId ? { paidSquareOrderId } : {}) };
@@ -415,7 +420,7 @@ async function cartResult(deps: AgentDeps, conv: Conversation): Promise<string> 
     return `Cart saved but has problems. Fix or ask the customer:\n${q.problems.join("\n")}`;
   }
   let offer = (await deps.orders.offerOneTap(conv, q.quote.totalCents, deps.inbound.turnId))
-    ? `\nOne-word pay is offered: code adds "Total ... Pay with ${conv.savedCard!.brand} ••${conv.savedCard!.last4}? Reply Y." to your reply, so don't write that line yourself. Don't send a link unless they ask.`
+    ? `\nOne-word pay is offered: code adds the total and the card question (Y, or a numbered list of their cards) to your reply, so don't write it yourself. Don't send a link unless they ask.`
     : "";
   if (!offer && deps.orders.shouldOfferCardSave(conv)) {
     conv.cardOfferMadeAt = (deps.now ?? (() => new Date()))();
@@ -429,7 +434,7 @@ async function runTool(
   conv: Conversation,
   name: string,
   input: unknown,
-): Promise<{ result: string; checkout?: { order: OrderRecord; summary: string; declinedFirst?: boolean } }> {
+): Promise<{ result: string; checkout?: { order: OrderRecord; summary: string; declinedFirst?: boolean; cardLabel?: string } }> {
   switch (name) {
     case "reorder_last": {
       const last = await deps.store.lastPaidOrderForPhone(conv.phone);
@@ -494,10 +499,10 @@ async function runTool(
     case "pay_with_saved_card": {
       const r = await deps.orders.payWithSavedCard(conv, { text: deps.inbound.text, turnId: deps.inbound.turnId, seq: deps.inbound.seq });
       if (r.ok) {
-        deps.onCharged?.(r.order, r.quote.text);
+        deps.onCharged?.(r.order, r.quote.text, cardLabel(r.card));
         return {
-          result: `Paid with the saved card: order #${r.order.orderNumber}, total ${formatMoney(r.order.totalCents, r.order.currency)}. The summary is appended for you; just say thanks.`,
-          checkout: { order: r.order, summary: r.quote.text },
+          result: `Paid with ${cardLabel(r.card)}: order #${r.order.orderNumber}, total ${formatMoney(r.order.totalCents, r.order.currency)}. The summary is appended for you; just say thanks.`,
+          checkout: { order: r.order, summary: r.quote.text, cardLabel: cardLabel(r.card) },
         };
       }
       if ("fallbackToLink" in r) {
@@ -511,9 +516,20 @@ async function runTool(
       return { result: r.reason };
     }
     case "forget_saved_card": {
-      if (!conv.savedCard) return { result: "There's no saved card on file." };
-      await deps.forgetCard(conv);
-      return { result: "Card removed. You'll get a payment link from now on." };
+      const cards = conv.savedCards?.length ? conv.savedCards : conv.savedCard ? [conv.savedCard] : [];
+      if (!cards.length) return { result: "There's no saved card on file." };
+      const n = z.object({ card: z.number().int().optional() }).parse(input ?? {}).card;
+      if (cards.length > 1 && !n) {
+        return { result: `Ask which card to remove: ${cards.map((c, i) => `${i + 1}. ${cardLabel(c)}`).join(", ")}. Then call forget_saved_card with that number.` };
+      }
+      const card = cards[(n ?? 1) - 1];
+      if (!card) return { result: `There's no card number ${n}. Ask them to pick ${numberChoices(cards.length)}.` };
+      await deps.forgetCard(conv, card);
+      return {
+        result: conv.savedCards.length
+          ? `${cardLabel(card)} removed.`
+          : "Card removed. You'll get a payment link from now on.",
+      };
     }
     case "cancel_order": {
       conv.cart = [];

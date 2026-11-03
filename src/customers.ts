@@ -1,5 +1,5 @@
-import type { SquareApi } from "./square/client.js";
-import type { Conversation } from "./store/types.js";
+import type { SquareApi, SquareCard } from "./square/client.js";
+import type { Conversation, SavedCard } from "./store/types.js";
 
 const LOOKUP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
@@ -35,6 +35,7 @@ export class CustomerService {
         conv.squareCustomerId = null;
         conv.customerAmbiguous = false;
         conv.savedCard = null;
+        conv.savedCards = [];
         conv.loyaltyAccountId = null;
         return;
       }
@@ -43,14 +44,15 @@ export class CustomerService {
         conv.squareCustomerId = null;
         conv.customerAmbiguous = true;
         conv.savedCard = null;
+        conv.savedCards = [];
         conv.loyaltyAccountId = null;
         return;
       }
       conv.squareCustomerId = best.id;
       conv.customerAmbiguous = false;
       if (!conv.customerName) conv.customerName = cleanName(best.given_name);
-      const card = (await this.square.listCards(best.id))[0];
-      conv.savedCard = card ? { id: card.id, brand: card.card_brand ?? "Card", last4: card.last_4 ?? "????" } : null;
+      conv.savedCards = distinctCards(await this.square.listCards(best.id));
+      conv.savedCard = conv.savedCards[0] ?? null;
       const account = await this.square.searchLoyaltyAccount(best.id).catch(() => null);
       conv.loyaltyAccountId = account?.id ?? null;
       conv.loyaltyBalance = account?.balance ?? null;
@@ -77,11 +79,29 @@ export class CustomerService {
   }
 }
 
+const MAX_LISTED_CARDS = 3;
+
+/** Saved cards newest first, one entry per physical card (by Square fingerprint), at most 3. */
+export function distinctCards(cards: SquareCard[]): SavedCard[] {
+  const sorted = [...cards].sort((a, b) => (b.created_at ?? "").localeCompare(a.created_at ?? ""));
+  const byKey = new Map<string, SavedCard>();
+  for (const c of sorted) {
+    const key = c.fingerprint ?? `${c.card_brand}:${c.last_4}:${c.id}`;
+    const seen = byKey.get(key);
+    if (seen) seen.otherIds = [...(seen.otherIds ?? []), c.id];
+    else byKey.set(key, { id: c.id, brand: c.card_brand ?? "Card", last4: c.last_4 ?? "????" });
+  }
+  return [...byKey.values()].slice(0, MAX_LISTED_CARDS);
+}
+
+export const cardLabel = (c: SavedCard) => `${c.brand} ••${c.last4}`;
+
 /** One line for the AI's system prompt. */
 export function customerPromptLine(conv: Conversation): string {
   const known = conv.squareCustomerId || conv.customerAmbiguous;
   if (!known) return "Square customer: no";
   const name = conv.customerName ? ` (given name ${JSON.stringify(conv.customerName)})` : "";
-  const card = conv.savedCard ? `${conv.savedCard.brand} ••${conv.savedCard.last4}` : "none";
+  const cards = conv.savedCards?.length ? conv.savedCards : conv.savedCard ? [conv.savedCard] : [];
+  const card = cards.length ? cards.map(cardLabel).join(", ") : "none";
   return `Square customer: yes${name} · saved card: ${card}${conv.loyaltyAccountId ? " · loyalty member" : ""}`;
 }
