@@ -100,7 +100,9 @@ export interface Store {
   countOrdersInSlot(slotKey: string): Promise<number>; // paid or awaiting payment
   listOrdersInSlotPrefix(prefix: string): Promise<OrderRecord[]>;
   lastPaidOrderForPhone(phone: string): Promise<OrderRecord | null>; // paid, ready or picked up; newest
-  countActiveAsapOrders(now: Date): Promise<number>; // paid, due now (no pickup time, or pickup time already reached)
+  countActiveAsapOrders(now: Date): Promise<number>;
+  /** This phone's card-on-file orders created at or after `since` (any status), newest first. */
+  listCardOrdersSince(phone: string, since: Date): Promise<OrderRecord[]>; // paid, due now (no pickup time, or pickup time already reached)
   nextOrderNumber(): Promise<number>;
 
   getSetting(key: string): Promise<string | null>;

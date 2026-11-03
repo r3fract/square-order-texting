@@ -63,6 +63,12 @@ export class MemoryStore implements Store {
   async countActiveAsapOrders(now: Date) {
     return [...this.orders.values()].filter((o) => o.status === "paid" && (!o.pickupAt || o.pickupAt <= now)).length;
   }
+  async listCardOrdersSince(phone: string, since: Date) {
+    return [...this.orders.values()]
+      .filter((o) => o.phone === phone && o.checkoutKind === "card_on_file" && o.createdAt >= since)
+      .sort((a, b) => +b.createdAt - +a.createdAt)
+      .map((o) => ({ ...o }));
+  }
   async nextOrderNumber() {
     return ++this.orderSeq;
   }

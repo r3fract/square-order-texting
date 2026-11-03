@@ -504,14 +504,13 @@ export class TextOrderService {
     let n = 0;
     for (const o of await this.d.store.listAwaitingCreatedBefore(cutoff)) {
       try {
+        if (o.checkoutKind === "card_on_file") {
+          if (await this.settleCardCharge(o)) n++;
+          continue;
+        }
         if (await this.orders.retire(o, "expired")) {
           n++;
-          await this.sendCustomer(
-            o.phone,
-            o.checkoutKind === "card_on_file"
-              ? `We couldn't confirm the card payment for order #${o.orderNumber}, so it was cancelled. You weren't charged. Text us again if you still want it.`
-              : `Your payment link for order #${o.orderNumber} expired. Text us again if you still want it.`,
-          );
+          await this.sendCustomer(o.phone, `Your payment link for order #${o.orderNumber} expired. Text us again if you still want it.`);
         }
       } catch (err) {
         this.log(`couldn't expire order ${o.id}`, err);
@@ -520,9 +519,27 @@ export class TextOrderService {
     return n;
   }
 
+  /** An unclear saved-card charge: mark it paid if Square took the money, expire it only if Square shows no charge. */
+  private async settleCardCharge(o: OrderRecord): Promise<boolean> {
+    const outcome = await this.orders.cardChargeOutcome(o);
+    if (outcome === "paid") {
+      await this.markPaid(o.squareOrderId);
+      return true;
+    }
+    if (outcome === "unpaid" && (await this.orders.retire(o, "expired"))) {
+      await this.sendCustomer(o.phone, `Square shows no charge for order #${o.orderNumber}, so it was cancelled. Text us again if you still want it.`);
+      return true;
+    }
+    return false; // Square unreachable: try again on the next sweep
+  }
+
   private async retireAllUnpaid(message: string): Promise<number> {
     let n = 0;
     for (const o of await this.d.store.listAwaitingCreatedBefore(new Date(this.now().getTime() + 1000))) {
+      if (o.checkoutKind === "card_on_file") {
+        if (await this.settleCardCharge(o).catch(() => false)) n++;
+        continue;
+      }
       try {
         if (await this.orders.retire(o, "canceled")) {
           n++;

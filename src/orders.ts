@@ -204,6 +204,7 @@ export class OrderService {
   async checkout(conv: Conversation): Promise<CheckoutResult> {
     const gate = await this.d.isAcceptingOrders();
     if (!gate.ok) return gate;
+    if (await this.unconfirmedCardOrder(conv.phone)) return { ok: false, reason: OrderService.STILL_CONFIRMING };
     const pickup = this.d.pickup(conv);
     if (!pickup.ok) return { ok: false, reason: pickup.reason };
     const full = await this.slotFull(pickup);
@@ -274,18 +275,27 @@ export class OrderService {
     return (this.d.now ?? (() => new Date()))();
   }
 
-  /** Card-on-file charges for this phone in the last 24 hours. */
+  /** Card-on-file charges for this phone in the last 24 hours, counting ones Square hasn't confirmed yet. */
   private async spentToday(phone: string): Promise<number> {
-    const since = this.nowDate().getTime() - DAY_MS;
-    return (await this.d.store.listOrders(500))
-      .filter((o) => o.phone === phone && o.checkoutKind === "card_on_file" && o.squarePaymentId && o.createdAt.getTime() >= since)
+    const since = new Date(this.nowDate().getTime() - DAY_MS);
+    return (await this.d.store.listCardOrdersSince(phone, since))
       .filter((o) => ["paid", "ready", "picked_up", "awaiting_payment"].includes(o.status))
       .reduce((s, o) => s + o.totalCents, 0);
   }
 
+  /** A card charge for this phone whose outcome Square hasn't confirmed (e.g. a timeout). */
+  async unconfirmedCardOrder(phone: string): Promise<OrderRecord | null> {
+    const since = new Date(this.nowDate().getTime() - DAY_MS);
+    return (await this.d.store.listCardOrdersSince(phone, since)).find((o) => o.status === "awaiting_payment") ?? null;
+  }
+
+  private static readonly STILL_CONFIRMING =
+    "We're still confirming your last card payment with Square. Tell them not to pay again yet: they'll get a text as soon as it's sorted.";
+
   /** One-word pay is only for a single, unambiguous Square customer with a saved card, under the per-order and daily caps. */
   async oneTapEligible(conv: Conversation, totalCents: number): Promise<boolean> {
     if (!(conv.savedCard && conv.squareCustomerId && !conv.customerAmbiguous && totalCents > 0 && totalCents <= this.d.oneTapMaxCents)) return false;
+    if (await this.unconfirmedCardOrder(conv.phone)) return false;
     return (await this.spentToday(conv.phone)) + totalCents <= this.d.oneTapDailyMaxCents;
   }
 
@@ -305,6 +315,7 @@ export class OrderService {
    */
   async payWithSavedCard(conv: Conversation, consent: Consent): Promise<CardPayResult> {
     const now = this.nowDate();
+    if (await this.unconfirmedCardOrder(conv.phone)) return { ok: false, reason: OrderService.STILL_CONFIRMING };
     const p = conv.pendingOneTap;
     if (p && (!AFFIRMATIVE.test(consent.text) || p.turnId === consent.turnId)) {
       return { ok: false, reason: "Wait for them to reply Y to your offer before calling pay_with_saved_card." };
@@ -489,6 +500,7 @@ export class OrderService {
   async checkoutWithInvoice(conv: Conversation): Promise<CheckoutResult> {
     const gate = await this.d.isAcceptingOrders();
     if (!gate.ok) return gate;
+    if (await this.unconfirmedCardOrder(conv.phone)) return { ok: false, reason: OrderService.STILL_CONFIRMING };
     const pickup = this.d.pickup(conv);
     if (!pickup.ok) return { ok: false, reason: pickup.reason };
     const full = await this.slotFull(pickup);
@@ -562,7 +574,21 @@ export class OrderService {
   async retireAwaiting(phone: string, status: "replaced" | "expired" | "canceled"): Promise<OrderRecord | null> {
     const existing = await this.d.store.getAwaitingOrderForPhone(phone);
     if (!existing) return null;
+    if (existing.checkoutKind === "card_on_file") return null; // an unconfirmed charge is settled with Square, never replaced
     return this.retire(existing, status);
+  }
+
+  /**
+   * For a card charge whose outcome was unclear: ask Square. "paid" if the order has a tender, "unpaid" if Square
+   * shows none, "unknown" if Square can't be reached (try again later).
+   */
+  async cardChargeOutcome(order: OrderRecord): Promise<"paid" | "unpaid" | "unknown"> {
+    try {
+      const sq = await this.d.square.retrieveOrder(order.squareOrderId);
+      return sq.state === "COMPLETED" || (sq.tenders?.length ?? 0) > 0 ? "paid" : "unpaid";
+    } catch {
+      return "unknown";
+    }
   }
 
   /** Deletes the link first, then marks the order, only if it's still unpaid (a payment may land at the same moment). */

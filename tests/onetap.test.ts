@@ -193,6 +193,50 @@ describe("one-word pay with a saved card", () => {
     expect(order).toMatchObject({ checkoutKind: "card_on_file", status: "awaiting_payment" });
   });
 
+  it("while a card payment is unconfirmed, nothing else can be paid", async () => {
+    const t = setup();
+    await offer(t);
+    t.square.failNext.createPayment = new SquareError("Square hiccup", 500, [{ code: "INTERNAL_SERVER_ERROR" }]);
+    t.model.push(tool("pay_with_saved_card"), say("Checking."));
+    await t.text("Y");
+    const pending = (await t.store.listOrders(1))[0]!;
+
+    await offer(t); // no new one-word offer while the last charge is unconfirmed
+    expect((await t.store.getConversation(PHONE)).pendingOneTap).toBeNull();
+    t.model.push(tool("send_checkout_link"), say("Link?"));
+    await t.text("just send me a link");
+    expect(t.lastToolResult()).toContain("still confirming your last card payment");
+    expect(t.square.calls).not.toContain("createPaymentLink");
+    expect((await t.store.getOrderBySquareId(pending.squareOrderId))!.status).toBe("awaiting_payment");
+  });
+
+  it("an unconfirmed charge that did go through is marked paid, not cancelled", async () => {
+    const t = setup();
+    await offer(t);
+    t.square.failNext.createPayment = new SquareError("timeout", 504, [{ code: "GATEWAY_TIMEOUT" }]);
+    t.model.push(tool("pay_with_saved_card"), say("Checking."));
+    await t.text("Y");
+    const pending = (await t.store.listOrders(1))[0]!;
+    t.square.orders.get(pending.squareOrderId)!.paid = true; // Square did charge it
+    t.advance(21 * 60_000);
+    await t.service.expireStaleLinks();
+    expect((await t.store.getOrderBySquareId(pending.squareOrderId))!.status).toBe("paid");
+    expect(t.sms.last(PHONE)).toContain("Paid, thanks! Order #");
+  });
+
+  it("an unconfirmed charge Square shows as unpaid expires with an accurate message", async () => {
+    const t = setup();
+    await offer(t);
+    t.square.failNext.createPayment = new SquareError("timeout", 504, [{ code: "GATEWAY_TIMEOUT" }]);
+    t.model.push(tool("pay_with_saved_card"), say("Checking."));
+    await t.text("Y");
+    const pending = (await t.store.listOrders(1))[0]!;
+    t.advance(21 * 60_000);
+    await t.service.expireStaleLinks();
+    expect((await t.store.getOrderBySquareId(pending.squareOrderId))!.status).toBe("expired");
+    expect(t.sms.last(PHONE)).toContain("Square shows no charge");
+  });
+
   it("a daily cap per phone stops one-word pay", async () => {
     const t = setup({ ONE_TAP_DAILY_MAX_CENTS: "1500" });
     await offer(t);

@@ -190,7 +190,7 @@ export class FakeSquare implements SquareApi {
   cards = new Map<string, SquareCard[]>();
   payments: (SquarePayment & { source_id: string; amount: number; customer_id: string })[] = [];
   invoices = new Map<string, SquareInvoice & { orderId: string; customerId: string; canceled?: boolean; storeCard: boolean }>();
-  orders = new Map<string, { input: SquareOrderInput; version: number; pickupAt?: string; discount: number; fulfillmentUid: string }>();
+  orders = new Map<string, { input: SquareOrderInput; version: number; pickupAt?: string; discount: number; fulfillmentUid: string; paid?: boolean }>();
   loyalty: { program: LoyaltyProgram | null; accounts: Map<string, LoyaltyAccount> } = { program: null, accounts: new Map() };
   accumulated: { accountId: string; orderId: string; idempotencyKey: string }[] = [];
   rewards: { accountId: string; rewardTierId: string; orderId: string }[] = [];
@@ -217,6 +217,7 @@ export class FakeSquare implements SquareApi {
       version: o.version,
       total_discount_money: cad(o.discount),
       total_money: cad(total),
+      ...(o.paid ? { state: "COMPLETED", tenders: [{ id: "TENDER1", type: "CARD" }] } : { state: "OPEN" }),
       fulfillments: [{ uid: o.fulfillmentUid, type: "PICKUP", state: "PROPOSED", pickup_details: { pickup_at: o.pickupAt } }],
     };
   }
@@ -263,7 +264,11 @@ export class FakeSquare implements SquareApi {
     const status = a.sourceId === "ccof:decline" ? "FAILED" : "COMPLETED";
     const p = { id: `PAY${++this.seq}`, status, order_id: a.orderId, source_id: a.sourceId, amount: a.amount.amount, customer_id: a.customerId };
     this.paymentByKey.set(a.idempotencyKey, p);
-    if (status === "COMPLETED") this.payments.push(p);
+    if (status === "COMPLETED") {
+      this.payments.push(p);
+      const o = this.orders.get(a.orderId);
+      if (o) o.paid = true;
+    }
     return p;
   }
   async createInvoice(a: { idempotencyKey: string; orderId: string; customerId: string; locationId: string; dueDate: string }) {

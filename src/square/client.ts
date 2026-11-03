@@ -77,6 +77,7 @@ export interface SquareOrder {
   id?: string;
   version?: number;
   state?: string;
+  tenders?: { id?: string; type?: string }[];
   line_items?: {
     uid?: string;
     name?: string;

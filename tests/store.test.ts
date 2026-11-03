@@ -63,6 +63,17 @@ function storeSuite(name: string, make: () => Promise<Store>, done?: (s: Store) 
       expect(await store.lastPaidOrderForPhone("+19999999999")).toBeNull();
     });
 
+    it("lists one phone's card orders since a time, however many other orders exist", async () => {
+      const phone = `+1807${uniq().slice(-7)}`;
+      const since = new Date("2026-11-03T00:00:00Z");
+      for (let i = 0; i < 600; i++) await store.createOrder(orderFixture({ phone: "+19990000000", createdAt: new Date("2026-11-03T12:00:00Z") }));
+      const mine = orderFixture({ phone, checkoutKind: "card_on_file", status: "awaiting_payment", squarePaymentId: null, createdAt: new Date("2026-11-03T05:00:00Z") });
+      await store.createOrder(mine);
+      await store.createOrder(orderFixture({ phone, checkoutKind: "card_on_file", createdAt: new Date("2026-11-02T05:00:00Z") })); // too old
+      await store.createOrder(orderFixture({ phone, checkoutKind: "link", createdAt: new Date("2026-11-03T06:00:00Z") })); // not a card order
+      expect((await store.listCardOrdersSince(phone, since)).map((o) => o.id)).toEqual([mine.id]);
+    });
+
     it("ASAP capacity ignores later intermission orders", async () => {
       const now = new Date("2030-01-01T20:00:00Z");
       const before = await store.countActiveAsapOrders(now);

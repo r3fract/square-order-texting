@@ -225,6 +225,14 @@ export class PostgresStore implements Store {
     return rows[0].n as number;
   }
 
+  async listCardOrdersSince(phone: string, since: Date) {
+    const { rows } = await this.pool.query(
+      "SELECT * FROM orders WHERE phone = $1 AND checkout_kind = 'card_on_file' AND created_at >= $2 ORDER BY created_at DESC",
+      [phone, since],
+    );
+    return rows.map(toOrder);
+  }
+
   async nextOrderNumber() {
     const { rows } = await this.pool.query(
       `INSERT INTO order_counters (day, last) VALUES ((now() AT TIME ZONE $1)::date, 1)
