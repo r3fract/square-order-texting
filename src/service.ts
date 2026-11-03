@@ -76,6 +76,7 @@ export class TextOrderService {
       prepMinutes: d.config.PREP_MINUTES,
       pickup: (conv) => this.resolve(conv.pickupTarget ?? { kind: "asap" }),
       allowTipping: d.config.ALLOW_TIPPING,
+      oneTapMaxCents: d.config.ONE_TAP_MAX_CENTS,
       now: () => this.now(),
       isAcceptingOrders: async () => {
         const s = await this.orderingStatus();
@@ -176,10 +177,13 @@ export class TextOrderService {
   async handleInboundSms(msg: { from: string; body: string; messageSid: string }): Promise<void> {
     if (!(await this.d.store.claimEvent(`twilio:${msg.messageSid}`))) return;
     const from = normalizePhone(msg.from);
-    await this.withLock(from, () => this.processInbound(from, msg.body ?? ""));
+    const paid = await this.withLock(from, () => this.processInbound(from, msg.body ?? ""));
+    // A saved card was charged during that turn. Marking it paid takes the same lock, so do it now it's released.
+    if (paid) await this.markPaid(paid);
   }
 
-  private async processInbound(from: string, rawBody: string) {
+  /** Returns the Square order id if a saved card was charged during this turn. */
+  private async processInbound(from: string, rawBody: string): Promise<string | undefined> {
     const { config, store } = this.d;
     const { text: body, found: hadCard } = redactCardNumbers(rawBody.trim());
 
@@ -239,14 +243,22 @@ export class TextOrderService {
       timeZone: config.TIMEZONE,
       gameSummary: () => this.game?.describe(config.TIMEZONE) ?? "No game clock (feed not set up).",
       resolvePickup: (t) => this.resolve(t),
+      forgetCard: async (c) => {
+        await this.d.square.disableCard(c.savedCard!.id);
+        c.savedCard = null;
+        c.pendingOneTap = null;
+      },
     };
 
     await this.customers.refresh(conv);
 
     let reply: string;
+    let paidSquareOrderId: string | undefined;
     try {
       const modelInput = hadCard ? `${body}\n\n(System note: the customer texted what looked like a card number; it was removed. Remind them never to text card details.)` : body;
-      reply = (await runAgentTurn(agentDeps, conv, modelInput)).reply;
+      const turn = await runAgentTurn(agentDeps, conv, modelInput);
+      reply = turn.reply;
+      paidSquareOrderId = turn.paidSquareOrderId;
     } catch (err) {
       this.log("agent turn failed", err);
       reply = "Sorry, something went wrong on our end. Please try again in a minute, or order at the window.";
@@ -256,6 +268,7 @@ export class TextOrderService {
     }
     await this.save(conv);
     await this.sendCustomer(from, reply);
+    return paidSquareOrderId;
   }
 
   private async startHandoff(conv: Conversation, reason: string) {
@@ -361,6 +374,11 @@ export class TextOrderService {
       else if (states.includes("COMPLETED")) await this.onPickedUp(u.order_id);
       else if (states.includes("CANCELED")) await this.onCanceled(u.order_id);
     }
+  }
+
+  /** Marks a Square order paid (from a webhook or a saved-card charge). Safe to call twice. */
+  async markPaid(squareOrderId: string) {
+    return this.onPaid(squareOrderId);
   }
 
   private async onPaid(squareOrderId: string) {

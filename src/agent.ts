@@ -108,6 +108,17 @@ export const TOOLS: ModelRequest["tools"] = [
     input_schema: { type: "object", properties: {} },
   },
   {
+    name: "pay_with_saved_card",
+    description:
+      "Charge the customer's saved card for the cart you just read back, after they reply Y / yes. Only works right after a one-word-pay offer from set_cart. Code checks the cart and total; you never pass amounts.",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
+    name: "forget_saved_card",
+    description: "Remove the customer's saved card when they ask (e.g. 'forget my card').",
+    input_schema: { type: "object", properties: {} },
+  },
+  {
     name: "cancel_order",
     description: "Empty the cart and cancel any unpaid payment link. Paid orders can't be canceled by text; use handoff_to_human for those.",
     input_schema: { type: "object", properties: {} },
@@ -144,11 +155,15 @@ export interface AgentDeps {
   gameSummary: () => string;
   /** Resolves a pickup target against the live game clock. */
   resolvePickup: (t: PickupTarget) => ResolvedPickup;
+  /** Disables the customer's saved card in Square. */
+  forgetCard: (conv: Conversation) => Promise<void>;
 }
 
 export interface AgentTurnResult {
   reply: string;
   checkout?: OrderRecord;
+  /** Set when a saved card was charged in this turn: mark it paid once the customer's lock is released. */
+  paidSquareOrderId?: string;
 }
 
 const MAX_TOOL_ROUNDS = 8;
@@ -214,6 +229,7 @@ How to take an order:
 
 Game: ${deps.gameSummary()}
 When they say end of a period, intermission, after the game or a time, call set_pickup_time. Never work out times yourself.
+If you offered one-word pay and they reply Y / yes / yep, call pay_with_saved_card. Anything else about the order means re-read and re-offer.
 Pickup: ${deps.pickupInstructions}
 Text ordering hours: ${deps.hoursText}
 Right now: ${localNow}. ${status.message}
@@ -274,6 +290,7 @@ export async function runAgentTurn(deps: AgentDeps, conv: Conversation, customer
   conv.messages = trimHistory(conv.messages);
   let checkout: OrderRecord | undefined;
   let checkoutQuote: string | undefined;
+  let declinedFirst = false;
   const texts: string[] = [];
   const sourceText: string[] = []; // where verified prices can come from: the live menu and tool results
 
@@ -301,6 +318,7 @@ export async function runAgentTurn(deps: AgentDeps, conv: Conversation, customer
         if (out.checkout) {
           checkout = out.checkout.order;
           checkoutQuote = out.checkout.summary;
+          declinedFirst ||= !!out.checkout.declinedFirst;
         }
         results.push({ type: "tool_result", tool_use_id: tu.id, content: out.result });
       } catch (err) {
@@ -333,11 +351,19 @@ export async function runAgentTurn(deps: AgentDeps, conv: Conversation, customer
     conv.messages.push({ role: "assistant", content: [{ type: "text", text: reply }] });
   }
 
+  let paidSquareOrderId: string | undefined;
   if (checkout && checkoutQuote) {
-    reply = `${reply ? reply + "\n\n" : ""}${checkoutQuote}\n\nPay here (Apple Pay, Google Pay or card):\n${checkout.paymentLinkUrl}`;
+    if (checkout.checkoutKind === "card_on_file") {
+      const card = conv.savedCard;
+      reply = `${reply ? reply + "\n\n" : ""}${checkoutQuote}\n\nCharged to ${card ? `${card.brand} ••${card.last4}` : "your saved card"}.`;
+      paidSquareOrderId = checkout.squareOrderId;
+    } else {
+      reply = `${reply ? reply + "\n\n" : ""}${checkoutQuote}\n\nPay here (Apple Pay, Google Pay or card):\n${checkout.paymentLinkUrl}`;
+    }
+    if (declinedFirst) reply = `That card didn't go through, so here's a secure link instead.\n\n${reply}`;
   }
   if (!reply) reply = "Sorry, I missed that. What can I get you?";
-  return { reply, checkout };
+  return { reply, checkout, ...(paidSquareOrderId ? { paidSquareOrderId } : {}) };
 }
 
 async function runTool(
@@ -345,7 +371,7 @@ async function runTool(
   conv: Conversation,
   name: string,
   input: unknown,
-): Promise<{ result: string; checkout?: { order: OrderRecord; summary: string } }> {
+): Promise<{ result: string; checkout?: { order: OrderRecord; summary: string; declinedFirst?: boolean } }> {
   switch (name) {
     case "set_cart": {
       const parsed = SetCartInput.parse(input);
@@ -357,8 +383,14 @@ async function runTool(
       }));
       if (conv.cart.length === 0) return { result: "Cart is now empty." };
       const q = await deps.orders.quote(conv);
-      if (!q.ok) return { result: `Cart saved but has problems. Fix or ask the customer:\n${q.problems.join("\n")}` };
-      return { result: `Cart saved. Square's pricing:\n${q.quote.text}` };
+      if (!q.ok) {
+        conv.pendingOneTap = null;
+        return { result: `Cart saved but has problems. Fix or ask the customer:\n${q.problems.join("\n")}` };
+      }
+      const offer = deps.orders.offerOneTap(conv, q.quote.totalCents)
+        ? `\nOffer one-word pay: end your read-back with "Pay with ${conv.savedCard!.brand} ••${conv.savedCard!.last4}? Reply Y." Don't send a link unless they ask.`
+        : "";
+      return { result: `Cart saved. Square's pricing:\n${q.quote.text}${offer}` };
     }
     case "set_pickup_details": {
       const p = PickupInput.parse(input);
@@ -384,6 +416,29 @@ async function runTool(
         result: `Link created for order #${r.order.orderNumber}, total ${formatMoney(r.order.totalCents, r.order.currency)}. The summary and link will be appended to your reply automatically.`,
         checkout: { order: r.order, summary: r.quote.text },
       };
+    }
+    case "pay_with_saved_card": {
+      const r = await deps.orders.payWithSavedCard(conv);
+      if (r.ok) {
+        return {
+          result: `Paid with the saved card: order #${r.order.orderNumber}, total ${formatMoney(r.order.totalCents, r.order.currency)}. The summary is appended for you; just say thanks.`,
+          checkout: { order: r.order, summary: r.quote.text },
+        };
+      }
+      if ("fallbackToLink" in r) {
+        const link = await deps.orders.checkout(conv);
+        if (!link.ok) return { result: `The saved card was declined and a link couldn't be made: ${link.reason}` };
+        return {
+          result: "The saved card was declined, so a payment link was created instead. It's appended for you; keep it short.",
+          checkout: { order: link.order, summary: link.quote.text, declinedFirst: true },
+        };
+      }
+      return { result: r.reason };
+    }
+    case "forget_saved_card": {
+      if (!conv.savedCard) return { result: "There's no saved card on file." };
+      await deps.forgetCard(conv);
+      return { result: "Card removed. You'll get a payment link from now on." };
     }
     case "cancel_order": {
       conv.cart = [];

@@ -1,10 +1,19 @@
-import { randomUUID } from "node:crypto";
-import type { SquareApi, SquareOrder, SquareOrderInput } from "./square/client.js";
+import { createHash, randomUUID } from "node:crypto";
+import { SquareError, type SquareApi, type SquareOrder, type SquareOrderInput } from "./square/client.js";
 import { formatMoney, variationAvailable, type Menu, type MenuService } from "./square/menu.js";
 import type { ResolvedPickup } from "./pickup.js";
 import type { CartLine, Conversation, OrderRecord, Store } from "./store/types.js";
 
 export const MAX_QTY_PER_LINE = 25;
+const ONE_TAP_WINDOW_MS = 10 * 60_000;
+
+/** Stable fingerprint of a cart, so a one-word "Y" only pays for exactly what was read back. */
+export function cartHash(cart: CartLine[]): string {
+  const norm = cart
+    .map((l) => ({ v: l.variationId, q: l.quantity, m: [...l.modifierIds].sort(), n: l.note ?? "" }))
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+  return createHash("sha256").update(JSON.stringify(norm)).digest("hex");
+}
 
 export interface CartProblem {
   line: number; // 1-based, 0 = whole cart
@@ -144,6 +153,7 @@ export interface OrderServiceDeps {
   /** Resolves the conversation's pickup target against the live game clock. */
   pickup: (conv: Conversation) => ResolvedPickup;
   allowTipping?: boolean;
+  oneTapMaxCents: number;
   isAcceptingOrders: () => Promise<{ ok: true } | { ok: false; reason: string }>;
   now?: () => Date;
 }
@@ -151,6 +161,8 @@ export interface OrderServiceDeps {
 export type CheckoutResult =
   | { ok: true; order: OrderRecord; quote: Quote }
   | { ok: false; reason: string };
+
+export type CardPayResult = CheckoutResult | { ok: false; reason: string; fallbackToLink: true };
 
 export class OrderService {
   constructor(private d: OrderServiceDeps) {}
@@ -233,6 +245,135 @@ export class OrderService {
       await this.d.square.deletePaymentLink(link.id).catch(() => {});
       throw err;
     }
+  }
+
+  private nowDate() {
+    return (this.d.now ?? (() => new Date()))();
+  }
+
+  /** One-word pay is only for a single, unambiguous Square customer with a saved card, under the cap. */
+  oneTapEligible(conv: Conversation, totalCents: number): boolean {
+    return !!(conv.savedCard && conv.squareCustomerId && !conv.customerAmbiguous && totalCents > 0 && totalCents <= this.d.oneTapMaxCents);
+  }
+
+  /** After a successful quote: open (or clear) the one-word pay offer for exactly this cart and total. */
+  offerOneTap(conv: Conversation, totalCents: number): boolean {
+    if (!this.oneTapEligible(conv, totalCents)) {
+      conv.pendingOneTap = null;
+      return false;
+    }
+    conv.pendingOneTap = { cartHash: cartHash(conv.cart), totalCents, offeredAt: this.nowDate() };
+    return true;
+  }
+
+  /**
+   * Charges the saved card for the cart the customer just said "Y" to. Refuses (never charges) unless the offer is
+   * open, under 10 minutes old, for this exact cart, and Square's order total still matches what was offered.
+   */
+  async payWithSavedCard(conv: Conversation): Promise<CardPayResult> {
+    const now = this.nowDate();
+    const p = conv.pendingOneTap;
+    if (!p) {
+      const recent = (await this.d.store.listOrders(50)).find(
+        (o) => o.phone === conv.phone && o.checkoutKind === "card_on_file" && o.squarePaymentId && now.getTime() - o.createdAt.getTime() < ONE_TAP_WINDOW_MS,
+      );
+      return { ok: false, reason: recent ? "That order is already paid." : "There's no one-word pay offer open. Read the order back first." };
+    }
+    if (p.cartHash !== cartHash(conv.cart)) {
+      conv.pendingOneTap = null;
+      return { ok: false, reason: "The order changed since the offer. Call set_cart, read it back and offer again." };
+    }
+    if (now.getTime() - new Date(p.offeredAt).getTime() > ONE_TAP_WINDOW_MS) {
+      conv.pendingOneTap = null;
+      return { ok: false, reason: "That offer expired. Call set_cart, read the order back and offer again." };
+    }
+    if (!this.oneTapEligible(conv, p.totalCents)) {
+      conv.pendingOneTap = null;
+      return { ok: false, reason: "One-word pay isn't available for this order. Send the payment link instead." };
+    }
+
+    const gate = await this.d.isAcceptingOrders();
+    if (!gate.ok) return gate;
+    const pickup = this.d.pickup(conv);
+    if (!pickup.ok) return { ok: false, reason: pickup.reason };
+    const full = await this.slotFull(pickup);
+    if (full) return { ok: false, reason: full };
+    const menu = await this.d.menus.getMenu(true);
+    const stock = await this.d.menus.getStock(menu, conv.cart.map((l) => l.variationId));
+    const problems = validateCart(menu, stock, conv.cart);
+    if (problems.length) return { ok: false, reason: problems.map((x) => x.message).join(" ") };
+
+    await this.retireAwaiting(conv.phone, "replaced"); // no stray payable links next to a card payment
+
+    const recordId = randomUUID();
+    const orderNumber = await this.d.store.nextOrderNumber();
+    const sqOrder = await this.d.square.createOrder({
+      idempotencyKey: `order:${recordId}`,
+      order: buildSquareOrder({
+        locationId: this.d.locationId,
+        cart: conv.cart,
+        conv,
+        orderNumber,
+        pickupAt: pickup.pickupAt,
+        pickupLabel: pickup.label,
+        ...(pickup.pickupAt ? { pickupPrepMinutes: this.d.prepMinutes } : {}),
+      }),
+    });
+    const quote = quoteFromOrder(sqOrder);
+    if (quote.totalCents !== p.totalCents) {
+      conv.pendingOneTap = { cartHash: p.cartHash, totalCents: quote.totalCents, offeredAt: now };
+      return { ok: false, reason: `The total is now ${formatMoney(quote.totalCents, quote.currency)}. Read that out and ask them to reply Y again to pay it.` };
+    }
+
+    const record: OrderRecord = {
+      id: recordId,
+      phone: conv.phone,
+      orderNumber,
+      squareOrderId: sqOrder.id!,
+      paymentLinkId: null,
+      paymentLinkUrl: null,
+      checkoutKind: "card_on_file",
+      invoiceId: null,
+      invoiceVersion: null,
+      squarePaymentId: null,
+      customerId: conv.squareCustomerId,
+      cart: conv.cart,
+      pickupAt: pickup.pickupAt,
+      pickupSlot: pickup.slotKey,
+      quotedReadyAt: pickup.pickupAt,
+      etaNotifiedAt: null,
+      totalCents: quote.totalCents,
+      currency: quote.currency,
+      summary: quote.text,
+      status: "awaiting_payment",
+      createdAt: now,
+      paidAt: null,
+      readyAt: null,
+    };
+    await this.d.store.createOrder(record); // before charging, so Square's webhook can find it
+
+    let payment;
+    try {
+      payment = await this.d.square.createPayment({
+        idempotencyKey: `card:${recordId}`,
+        sourceId: conv.savedCard!.id,
+        customerId: conv.squareCustomerId!,
+        orderId: sqOrder.id!,
+        amount: { amount: quote.totalCents, currency: quote.currency },
+        locationId: this.d.locationId,
+      });
+    } catch (err) {
+      if (!(err instanceof SquareError)) throw err;
+      payment = null; // Square reports declines as errors too
+    }
+    conv.pendingOneTap = null;
+    if (!payment || payment.status !== "COMPLETED") {
+      await this.d.store.transitionOrder(record.id, ["awaiting_payment"], { status: "canceled" });
+      return { ok: false, reason: "The saved card was declined.", fallbackToLink: true };
+    }
+    await this.d.store.updateOrder(record.id, { squarePaymentId: payment.id });
+    record.squarePaymentId = payment.id;
+    return { ok: true, order: record, quote };
   }
 
   /** Null if the pickup slot has room, else the reason to tell the customer. */
