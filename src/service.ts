@@ -7,6 +7,7 @@ import { GameService, ordinal } from "./game/service.js";
 import type { Timeline } from "./game/timeline.js";
 import { HoursService } from "./hours.js";
 import { resolvePickup, shortTime, type ResolvedPickup } from "./pickup.js";
+import { reconcileSchedule } from "./schedule.js";
 import { OrderService } from "./orders.js";
 import type { SquareApi } from "./square/client.js";
 import { formatMoney, MenuService } from "./square/menu.js";
@@ -112,8 +113,21 @@ export class TextOrderService {
     return resolvePickup(t, today, this.game?.usable() ?? false, this.now(), this.d.config.TIMEZONE);
   }
 
-  /** Called by the game poller whenever the intermission estimate changes. Scheduled orders follow in Task 7. */
-  private async onTimelineChange(_prev: Timeline | null, _next: Timeline): Promise<void> {}
+  /** Called by the game poller whenever the intermission estimate changes: scheduled orders follow the game. */
+  private async onTimelineChange(prev: Timeline | null, next: Timeline): Promise<void> {
+    await reconcileSchedule(
+      {
+        square: this.d.square,
+        store: this.d.store,
+        now: () => this.now(),
+        tz: this.d.config.TIMEZONE,
+        sendCustomer: (p, t) => this.sendCustomer(p, t),
+        notifyOwner: (t) => this.notifyOwner(t),
+      },
+      prev,
+      next,
+    );
+  }
 
   /** Ordering hours right now: the ORDERING_HOURS override, else Square business hours. */
   hours() {

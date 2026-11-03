@@ -2,44 +2,13 @@ import pg from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { MemoryStore } from "../src/store/memory.js";
 import { PostgresStore } from "../src/store/postgres.js";
-import type { OrderRecord, Store } from "../src/store/types.js";
+import type { Store } from "../src/store/types.js";
+import { orderFixture } from "./fakes.js";
 
 const url = process.env.TEST_DATABASE_URL;
 let seq = 0;
 const uniq = () => `${Date.now()}${++seq}${Math.floor(Math.random() * 1e6)}`;
 
-export function orderFixture(over: Partial<OrderRecord> = {}): OrderRecord {
-  const id = `o-${uniq()}`;
-  return {
-    id,
-    phone: "+18075551234",
-    orderNumber: 1,
-    squareOrderId: `SQ-${id}`,
-    paymentLinkId: null,
-    paymentLinkUrl: null,
-    checkoutKind: "card_on_file",
-    invoiceId: null,
-    invoiceVersion: null,
-    squarePaymentId: "PAY1",
-    customerId: "CUST1",
-    cart: [
-      { variationId: "V1", quantity: 2, modifierIds: ["M1"] },
-      { variationId: "V2", quantity: 1, modifierIds: [], note: "no salt" },
-    ],
-    pickupAt: null,
-    pickupSlot: "asap",
-    quotedReadyAt: null,
-    etaNotifiedAt: null,
-    totalCents: 1000,
-    currency: "CAD",
-    summary: "s",
-    status: "paid",
-    createdAt: new Date("2026-11-03T23:00:00Z"),
-    paidAt: new Date("2026-11-03T23:01:00Z"),
-    readyAt: null,
-    ...over,
-  };
-}
 
 function storeSuite(name: string, make: () => Promise<Store>, done?: (s: Store) => Promise<void>) {
   describe(name, () => {

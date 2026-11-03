@@ -6,7 +6,10 @@ import type {
 } from "../src/square/client.js";
 import type { SmsSender } from "../src/sms.js";
 
+import type { OrderRecord } from "../src/store/types.js";
+
 export const LOC = "LOC1";
+let fixtureSeq = 0;
 const cad = (amount: number) => ({ amount, currency: "CAD" });
 
 /** A small canteen catalog in Square's JSON shape. */
@@ -165,6 +168,8 @@ export class FakeSquare implements SquareApi {
     const n = ++this.seq;
     const link = { id: `PL${n}`, url: `https://square.link/u/test${n}`, order_id: `SQORD${n}` };
     this.links.set(link.id, { url: link.url, orderId: link.order_id, deleted: false, order });
+    const pf = (order.fulfillments?.[0] ?? {}) as { pickup_details?: { pickup_at?: string } };
+    this.orders.set(link.order_id, { input: order, version: 1, pickupAt: pf.pickup_details?.pickup_at, discount: 0, fulfillmentUid: `F${n}` });
     return { link, order: { ...this.price(order), id: link.order_id } };
   }
   async deletePaymentLink(id: string) {
@@ -368,4 +373,38 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
     ORDERING_HOURS: "sun=00:00-23:59,mon=00:00-23:59,tue=00:00-23:59,wed=00:00-23:59,thu=00:00-23:59,fri=00:00-23:59,sat=00:00-23:59",
     ...overrides,
   });
+}
+
+/** A complete OrderRecord for store-level tests. */
+export function orderFixture(over: Partial<OrderRecord> = {}): OrderRecord {
+  const id = `o-${`${Date.now()}${++fixtureSeq}${Math.floor(Math.random() * 1e6)}`}`;
+  return {
+    id,
+    phone: "+18075551234",
+    orderNumber: 1,
+    squareOrderId: `SQ-${id}`,
+    paymentLinkId: null,
+    paymentLinkUrl: null,
+    checkoutKind: "card_on_file",
+    invoiceId: null,
+    invoiceVersion: null,
+    squarePaymentId: "PAY1",
+    customerId: "CUST1",
+    cart: [
+      { variationId: "V1", quantity: 2, modifierIds: ["M1"] },
+      { variationId: "V2", quantity: 1, modifierIds: [], note: "no salt" },
+    ],
+    pickupAt: null,
+    pickupSlot: "asap",
+    quotedReadyAt: null,
+    etaNotifiedAt: null,
+    totalCents: 1000,
+    currency: "CAD",
+    summary: "s",
+    status: "paid",
+    createdAt: new Date("2026-11-03T23:00:00Z"),
+    paidAt: new Date("2026-11-03T23:01:00Z"),
+    readyAt: null,
+    ...over,
+  };
 }

@@ -78,7 +78,7 @@ function setup(over: Record<string, string> = {}, now = PRE) {
   const sms = new FakeSms();
   const model = new ScriptedModel();
   let clock = now;
-  const games = parseScorebar(fixture);
+  let games = parseScorebar(fixture);
   const service = new TextOrderService({
     config: testConfig({ TIMEZONE: TZ, HOCKEYTECH_TEAM_ID: "9", ...over }),
     store, square, sms, model, now: () => clock, log: () => {}, fetchGames: async () => games,
@@ -86,7 +86,7 @@ function setup(over: Record<string, string> = {}, now = PRE) {
   const text = (body: string, from = PHONE) => service.handleInboundSms({ from, body, messageSid: `SMp${++sid}` });
   const pay = (orderId: string) =>
     service.handleSquareEvent({ event_id: `ev${++sid}`, type: "payment.updated", data: { object: { payment: { status: "COMPLETED", order_id: orderId } } } });
-  return { store, square, sms, model, service, text, pay, setClock: (d: Date) => (clock = d) };
+  return { store, square, sms, model, service, text, pay, setClock: (d: Date) => (clock = d), setGames: (g: FeedGame[]) => (games = g) };
 }
 const LINES = { lines: [{ variation_id: "V_POUTINE", quantity: 1 }] };
 
@@ -154,6 +154,22 @@ describe("ordering for an intermission", () => {
     t.model.push(tool("set_cart", LINES), tool("send_checkout_link"), say("again"));
     await t.text("another poutine");
     expect((await t.store.getAwaitingOrderForPhone(PHONE))!.pickupSlot).toBe("asap");
+  });
+
+  it("a slower 2nd period moves the order in Square and tells the customer", async () => {
+    const t = setup();
+    await t.service.game!.tick();
+    t.model.push(tool("set_cart", LINES), tool("set_pickup_time", { target: "intermission_2" }), tool("send_checkout_link"), say("ok"));
+    await t.text("poutine end of 2nd");
+    await t.pay("SQORD1");
+
+    const liveGames = parseScorebar(fixture).map((g) => (g.id === "4011" ? { ...g, status: "in_progress" as const, period: 2, clockSeconds: 15 * 60 } : g));
+    t.setGames(liveGames);
+    t.setClock(new Date("2026-11-08T21:30:00Z")); // 4:30pm; 15:00 left × 105 s ≈ 4:56:15
+    await t.service.game!.tick();
+
+    expect(t.square.orders.get("SQORD1")!.pickupAt).toBe("2026-11-08T21:56:15.000Z");
+    expect(t.sms.last(PHONE)).toBe("Heads up: the 2nd period is running long. Order #1 will be ready about 4:56.");
   });
 
   it("ASAP paid text says the place in line", async () => {
