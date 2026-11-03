@@ -47,6 +47,22 @@ export class MemoryStore implements Store {
   async countActiveOrders() {
     return [...this.orders.values()].filter((o) => o.status === "paid").length;
   }
+  async countOrdersInSlot(slotKey: string) {
+    return [...this.orders.values()].filter((o) => o.pickupSlot === slotKey && (o.status === "paid" || o.status === "awaiting_payment")).length;
+  }
+  async listOrdersInSlotPrefix(prefix: string) {
+    return [...this.orders.values()].filter((o) => o.pickupSlot?.startsWith(prefix)).map((o) => ({ ...o }));
+  }
+  async lastPaidOrderForPhone(phone: string) {
+    const done = ["paid", "ready", "picked_up"];
+    const hit = [...this.orders.values()]
+      .filter((o) => o.phone === phone && done.includes(o.status))
+      .sort((a, b) => +b.createdAt - +a.createdAt)[0];
+    return hit ? { ...hit } : null;
+  }
+  async countActiveAsapOrders(now: Date) {
+    return [...this.orders.values()].filter((o) => o.status === "paid" && (!o.pickupAt || o.pickupAt <= now)).length;
+  }
   async nextOrderNumber() {
     return ++this.orderSeq;
   }

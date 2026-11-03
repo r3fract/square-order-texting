@@ -185,6 +185,16 @@ export class OrderService {
       squareOrderId: link.order_id,
       paymentLinkId: link.id,
       paymentLinkUrl: link.url,
+      checkoutKind: "link",
+      invoiceId: null,
+      invoiceVersion: null,
+      squarePaymentId: null,
+      customerId: conv.squareCustomerId,
+      cart: conv.cart,
+      pickupAt: null,
+      pickupSlot: "asap",
+      quotedReadyAt: null,
+      etaNotifiedAt: null,
       totalCents: quote.totalCents,
       currency: quote.currency,
       summary: quote.text,
@@ -211,7 +221,7 @@ export class OrderService {
 
   /** Deletes the link first, then marks the order, only if it's still unpaid (a payment may land at the same moment). */
   async retire(order: OrderRecord, status: "replaced" | "expired" | "canceled"): Promise<OrderRecord | null> {
-    await this.d.square.deletePaymentLink(order.paymentLinkId);
+    if (order.paymentLinkId) await this.d.square.deletePaymentLink(order.paymentLinkId);
     return this.d.store.transitionOrder(order.id, ["awaiting_payment"], { status });
   }
 }
