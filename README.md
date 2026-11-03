@@ -1,12 +1,39 @@
 # Text-to-Order
 
-Customers text a regular phone number in plain language ("2 poutines, a large fries and a dirty dr pepper w coconut, pickup after 2nd period"). Claude builds the order against your **live Square catalog and stock**. Square prices it, and the customer gets a Square checkout link (Apple Pay, Google Pay or card). Once they pay, the order shows up in Square POS / KDS as a pickup order. When staff mark it ready in Square, the customer gets a text.
+Order food by text message from your seat. Customers text a regular phone number in plain language ("2 poutines and a large fries for the end of the 2nd"). Claude builds the order against your **live Square catalog and stock**, and Square prices it.
+
+Customers pay one of three ways:
+- **Square checkout link:** Apple Pay, Google Pay or card.
+- **Saved card:** regulars with a card on file just reply **Y**, or a card number from a list.
+- **Save-card page:** a Square page where they can tick "Save my card on file" for next time.
+
+Paid orders show up in Square POS / KDS as pickup orders. Orders can be timed to hockey intermissions, which are estimated from a live game feed. When staff mark an order ready in Square, the customer gets a text.
+
+Built for a hockey rink canteen: Square for the menu, payments and kitchen, Twilio for SMS, Claude for the conversation. See [docs/DESIGN.md](docs/DESIGN.md) for the design.
 
 ```
-Customer SMS ─► Twilio ─► this service (Claude + tools) ─► Square Catalog / Inventory / Orders / Checkout
-       ▲                                                         │
-       └──────────── reply + pay link ◄──── webhooks (paid, ready) ┘
+Customer SMS ─► Twilio ─► this service (Claude + tools) ─► Square Catalog / Inventory / Orders / Checkout / Cards
+       ▲                         │  ▲                              │
+       │                 game feed (HockeyTech)                    │
+       └──────── reply + pay link / "Reply Y" ◄──── webhooks (paid, ready, picked up) ┘
 ```
+
+## Project layout
+
+| Path | What it does |
+|---|---|
+| `src/service.ts` | Main controller: inbound texts, owner commands, Square events, customer texts, expiry sweep |
+| `src/agent.ts` | Claude's prompt and tools; code adds prices, links and the "Reply Y" question |
+| `src/orders.ts` | Cart checks and checkout: payment link, save-card invoice, guarded saved-card charges |
+| `src/customers.ts` | Phone → Square customer, saved cards, name cleaning |
+| `src/hours.ts` | Ordering hours from Square business hours |
+| `src/pickup.ts`, `src/schedule.ts` | Pickup times (intermission, after the game, clock time) and keeping them in step with the game |
+| `src/game/` | HockeyTech feed, intermission estimates, poller |
+| `src/loyalty.ts` | Square Loyalty for existing members |
+| `src/square/` | Square REST client, menu, webhook signatures |
+| `src/store/`, `sql/` | Postgres (and in-memory) storage |
+| `scripts/` | `chat.ts` (talk to the bot in a terminal), `menu.ts`, `game.ts` |
+| `tests/` | vitest suite with a fake Square and a scripted model |
 
 ## What it guarantees
 

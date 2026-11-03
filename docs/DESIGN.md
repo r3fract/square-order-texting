@@ -1,6 +1,6 @@
 # Game-night text ordering: design
 
-Date: 2026-11-03 · Status: draft for review
+Date: 2026-11-03 · Status: implemented
 
 ## Why
 
@@ -35,7 +35,7 @@ Success: ordering by text becomes the main way people order at the canteen. It h
 
 ## Constraints
 
-- Existing TypeScript / Fastify / Postgres app ([src/](../../../src/)). Square REST client in [src/square/client.ts](../../../src/square/client.ts), pinned `SQUARE_API_VERSION`.
+- Existing TypeScript / Fastify / Postgres app ([src/](../src/)). Square REST client in [src/square/client.ts](../src/square/client.ts), pinned `SQUARE_API_VERSION`.
 - SMS only (Twilio). Canada, CAD. Square sandbox now, production later.
 - Single app instance (in-memory per-customer locks).
 - Prices, totals and payments come from Square, never the AI. This existing guarantee must hold for every new path, including one-word pay.

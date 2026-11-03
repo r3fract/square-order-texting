@@ -27,9 +27,9 @@ describe("Square client: new endpoints", () => {
 
   it("searchCustomersByPhone uses an exact phone filter", async () => {
     const { sq, calls } = client([{ json: { customers: [{ id: "C1", given_name: "Riley" }] } }]);
-    const out = await sq.searchCustomersByPhone("+18072768533");
+    const out = await sq.searchCustomersByPhone("+18075550123");
     expect(calls[0]).toMatchObject({ method: "POST", path: "/v2/customers/search" });
-    expect(calls[0]!.body.query).toEqual({ filter: { phone_number: { exact: "+18072768533" } } });
+    expect(calls[0]!.body.query).toEqual({ filter: { phone_number: { exact: "+18075550123" } } });
     expect(out).toEqual([{ id: "C1", given_name: "Riley" }]);
   });
 
@@ -40,9 +40,9 @@ describe("Square client: new endpoints", () => {
 
   it("createCustomer sends name and phone", async () => {
     const { sq, calls } = client([{ json: { customer: { id: "C2" } } }]);
-    const c = await sq.createCustomer({ idempotencyKey: "k", givenName: "Riley", phone: "+18072768533" });
+    const c = await sq.createCustomer({ idempotencyKey: "k", givenName: "Riley", phone: "+18075550123" });
     expect(calls[0]).toMatchObject({ method: "POST", path: "/v2/customers" });
-    expect(calls[0]!.body).toMatchObject({ idempotency_key: "k", given_name: "Riley", phone_number: "+18072768533" });
+    expect(calls[0]!.body).toMatchObject({ idempotency_key: "k", given_name: "Riley", phone_number: "+18075550123" });
     expect(c.id).toBe("C2");
   });
 
