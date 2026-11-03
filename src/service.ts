@@ -269,11 +269,13 @@ export class TextOrderService {
     let reply: string;
     let paidSquareOrderId: string | undefined;
     let charged: { order: OrderRecord; summary: string } | null = null;
+    let offerShown = false;
     try {
       const modelInput = hadCard ? `${body}\n\n(System note: the customer texted what looked like a card number; it was removed. Remind them never to text card details.)` : body;
       const turn = await runAgentTurn(agentDeps, conv, modelInput);
       reply = turn.reply;
       paidSquareOrderId = turn.paidSquareOrderId;
+      offerShown = !!turn.offerShown;
     } catch (err) {
       this.log("agent turn failed", err);
       const c = charged as { order: OrderRecord; summary: string } | null;
@@ -289,10 +291,13 @@ export class TextOrderService {
     if (hadCard && !/card/i.test(reply)) {
       reply = `For your safety, please don't text card numbers. Pay only through the secure link.\n\n${reply}`;
     }
+    // An offer made this turn counts only if the code-written question actually reached the customer.
+    if (conv.pendingOneTap?.turnId === messageSid && !offerShown) conv.pendingOneTap = null;
     await this.save(conv);
-    await this.sendCustomer(from, reply);
+    const sent = await this.sendCustomer(from, reply);
     if (conv.pendingOneTap?.turnId === messageSid) {
-      conv.pendingOneTap.shownAfterSeq = this.lastSeq; // texts that arrived before this send can't say Y to it
+      if (sent) conv.pendingOneTap.shownAfterSeq = this.lastSeq; // texts that arrived before this send can't say Y to it
+      else conv.pendingOneTap = null;
       await this.save(conv);
     }
     return paidSquareOrderId;

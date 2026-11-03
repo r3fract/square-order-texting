@@ -32,7 +32,7 @@ describe("one-word pay with a saved card", () => {
   it("set_cart offers one-word pay to a customer with a saved card", async () => {
     const t = setup();
     await offer(t);
-    expect(JSON.stringify(t.model.requests[1]!.messages.at(-1))).toContain('end your read-back with \\"Pay with VISA ••1111? Reply Y.\\"');
+    expect(JSON.stringify(t.model.requests[1]!.messages.at(-1))).toContain("One-word pay is offered: code adds");
     expect(t.model.requests[0]!.system).toContain("call pay_with_saved_card");
     const conv = await t.store.getConversation(PHONE);
     expect(conv.pendingOneTap).toMatchObject({ totalCents: 1017 });
@@ -300,6 +300,25 @@ describe("one-word pay with a saved card", () => {
     expect(texts.at(-2)).not.toContain("something went wrong");
     expect(texts.at(-1)).toContain("Paid, thanks! Order #1.");
     expect((await t.store.listOrders(1))[0]!.status).toBe("paid");
+  });
+
+  it("an offer the customer never saw (AI failed that turn) can't be paid", async () => {
+    const t = setup();
+    t.model.push(tool("set_cart", LINES), () => {
+      throw new Error("529 overloaded");
+    });
+    await t.text("a poutine please");
+    expect(t.sms.last(PHONE)).toContain("something went wrong");
+    t.model.push(tool("pay_with_saved_card"), say("?"));
+    await t.text("Y");
+    expect(t.square.payments).toHaveLength(0);
+  });
+
+  it("the code's offer line is always sent, even if the AI wrote a wrong one", async () => {
+    const t = setup();
+    t.model.push(tool("set_cart", LINES), say("A poutine. Pay with VISA ••9999? Reply Y."));
+    await t.text("a poutine please");
+    expect(t.sms.last(PHONE)).toContain("Total $10.17. Pay with VISA ••1111? Reply Y.");
   });
 
   it("two profiles on one phone never get one-word pay", async () => {

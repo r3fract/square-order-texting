@@ -186,6 +186,8 @@ export interface AgentTurnResult {
   checkout?: OrderRecord;
   /** Set when a saved card was charged in this turn: mark it paid once the customer's lock is released. */
   paidSquareOrderId?: string;
+  /** True when this reply carries the code-written one-word-pay question. */
+  offerShown?: boolean;
 }
 
 const MAX_TOOL_ROUNDS = 8;
@@ -392,12 +394,15 @@ export async function runAgentTurn(deps: AgentDeps, conv: Conversation, customer
     if (declinedFirst) reply = `That card didn't go through, so here's a secure link instead.\n\n${reply}`;
   }
   if (!reply) reply = "Sorry, I missed that. What can I get you?";
-  // The one-word-pay question the customer answers "Y" to is written by code, so the card and total are always shown.
+  // The one-word-pay question the customer answers "Y" to is always written by code (the AI's wording could name the
+  // wrong card or total), so the card and Square's total are what they say yes to.
   const p = conv.pendingOneTap;
-  if (!checkout && p && p.turnId === deps.inbound.turnId && conv.savedCard && !/Reply Y\b/i.test(reply)) {
+  let offerShown = false;
+  if (!checkout && p && p.turnId === deps.inbound.turnId && conv.savedCard) {
     reply = `${reply}\n\nTotal ${formatMoney(p.totalCents)}. Pay with ${conv.savedCard.brand} ••${conv.savedCard.last4}? Reply Y.`;
+    offerShown = true;
   }
-  return { reply, checkout, ...(paidSquareOrderId ? { paidSquareOrderId } : {}) };
+  return { reply, checkout, offerShown, ...(paidSquareOrderId ? { paidSquareOrderId } : {}) };
 }
 
 
@@ -410,7 +415,7 @@ async function cartResult(deps: AgentDeps, conv: Conversation): Promise<string> 
     return `Cart saved but has problems. Fix or ask the customer:\n${q.problems.join("\n")}`;
   }
   let offer = (await deps.orders.offerOneTap(conv, q.quote.totalCents, deps.inbound.turnId))
-    ? `\nOffer one-word pay: end your read-back with "Pay with ${conv.savedCard!.brand} ••${conv.savedCard!.last4}? Reply Y." Don't send a link unless they ask.`
+    ? `\nOne-word pay is offered: code adds "Total ... Pay with ${conv.savedCard!.brand} ••${conv.savedCard!.last4}? Reply Y." to your reply, so don't write that line yourself. Don't send a link unless they ask.`
     : "";
   if (!offer && deps.orders.shouldOfferCardSave(conv)) {
     conv.cardOfferMadeAt = (deps.now ?? (() => new Date()))();
