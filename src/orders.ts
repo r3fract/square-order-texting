@@ -368,7 +368,15 @@ export class OrderService {
       return { ok: false, reason: "That offer expired. Call set_cart, read the order back and offer again." };
     }
     await this.d.refreshCustomer(conv); // the card or profile may have changed in Square since the offer
-    const card = (conv.savedCards?.length ? conv.savedCards : conv.savedCard ? [conv.savedCard] : []).find((c) => c.id === chosenId);
+    const current = conv.savedCards?.length ? conv.savedCards : conv.savedCard ? [conv.savedCard] : [];
+    const listed = p.cardIds?.length ? p.cardIds : chosenId ? [chosenId] : [];
+    if (current.length && listed.some((id) => !current.some((c) => c.id === id))) {
+      // The numbered list the customer answered no longer matches their cards: a number could now mean a different
+      // card. Re-offer the current list (code shows it) instead of charging.
+      conv.pendingOneTap = { ...p, cardIds: current.map((c) => c.id), offeredAt: now, turnId: consent.turnId, shownAfterSeq: undefined };
+      return { ok: false, reason: "Their saved cards changed since the offer, so nothing was charged. The updated list is added to your reply; ask them to pick again." };
+    }
+    const card = current.find((c) => c.id === chosenId);
     if (!card) {
       conv.pendingOneTap = null;
       return { ok: false, reason: "The saved card isn't available anymore. Send the payment link instead." };
@@ -432,7 +440,7 @@ export class OrderService {
         squareOrderId: sqOrder.id!,
         recordId,
         orderNumber,
-        cardIds: p.cardIds ?? [card.id],
+        cardIds: current.map((c) => c.id), // the list as it is now (just re-read from Square)
         ...(rewardId ? { rewardId } : {}),
       };
       return { ok: false, reason: `The total is now ${formatMoney(quote.totalCents, quote.currency)}. Read that out and ask them to reply Y again to pay it.` };

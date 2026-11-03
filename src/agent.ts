@@ -405,6 +405,7 @@ export async function runAgentTurn(deps: AgentDeps, conv: Conversation, customer
       offered.length === 1
         ? `${reply}\n\nTotal ${formatMoney(p.totalCents)}. Pay with ${cardLabel(offered[0]!)}? Reply Y.`
         : `${reply}\n\nTotal ${formatMoney(p.totalCents)}. Which card?\n${offered.map((c, i) => `${i + 1}. ${cardLabel(c)}`).join("\n")}\nReply ${numberChoices(offered.length)}.`;
+    p.cardIds = offered.map((c) => c.id); // the numbers mean exactly the list shown
     offerShown = true;
   }
   return { reply, checkout, offerShown, ...(paidSquareOrderId ? { paidSquareOrderId } : {}) };

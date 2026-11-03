@@ -377,6 +377,40 @@ describe("one-word pay with a saved card", () => {
       expect(t.square.payments).toHaveLength(1);
     });
 
+    it("numbers always mean the list the customer saw, even after a card disappears", async () => {
+      const t = setup();
+      t.square.cards.set("C1", [
+        { id: "ccof:A", card_brand: "VISA", last_4: "0001", enabled: true, fingerprint: "a", created_at: "2026-11-03T03:00:00Z" },
+        { id: "ccof:B", card_brand: "VISA", last_4: "0002", enabled: true, fingerprint: "b", created_at: "2026-11-02T00:00:00Z" },
+        { id: "ccof:C", card_brand: "VISA", last_4: "0003", enabled: true, fingerprint: "c", created_at: "2026-11-01T00:00:00Z" },
+      ]);
+      t.model.push(tool("set_cart", LINES), say("A poutine."));
+      await t.text("a poutine");
+      expect(t.sms.last(PHONE)).toContain("1. VISA ••0001\n2. VISA ••0002\n3. VISA ••0003");
+
+      t.square.cards.get("C1")![0]!.enabled = false; // card A removed in Square
+      t.model.push(tool("pay_with_saved_card"), say("Your cards changed."));
+      await t.text("3"); // C, but the list changed under it → re-offer, no charge
+      expect(t.square.payments).toHaveLength(0);
+      expect(t.sms.last(PHONE)).toContain("1. VISA ••0002\n2. VISA ••0003");
+
+      t.model.push(tool("pay_with_saved_card"), say("Done"));
+      await t.text("2"); // C on the list they now see
+      expect(t.square.payments).toHaveLength(1);
+      expect(t.square.payments[0]!.source_id).toBe("ccof:C");
+    });
+
+    it("if a listed card vanished before the reply, it re-offers instead of charging", async () => {
+      const t = multi();
+      t.model.push(tool("set_cart", LINES), say("A poutine."));
+      await t.text("a poutine please");
+      t.square.cards.get("C1")!.find((c) => c.id === "ccof:new")!.enabled = false;
+      t.model.push(tool("pay_with_saved_card"), say("Hmm"));
+      await t.text("2");
+      expect(t.square.payments).toHaveLength(0);
+      expect(t.lastToolResult()).toContain("Their saved cards changed");
+    });
+
     it("forget my card asks which, then removes that one", async () => {
       const t = multi();
       t.model.push(say("hi"));
