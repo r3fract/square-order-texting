@@ -132,6 +132,7 @@ export function buildSquareOrder(opts: {
       },
     ],
     metadata: { source: "text-to-order" },
+    pricing_options: { auto_apply_taxes: true },
     ...(conv.squareCustomerId ? { customer_id: conv.squareCustomerId } : {}),
   };
 }

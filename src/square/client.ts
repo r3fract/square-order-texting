@@ -71,6 +71,8 @@ export interface SquareOrderInput {
   fulfillments?: unknown[];
   metadata?: Record<string, string>;
   customer_id?: string;
+  /** Without auto_apply_taxes, Square ignores the catalog's taxes and charges none. */
+  pricing_options?: { auto_apply_taxes?: boolean; auto_apply_discounts?: boolean };
 }
 
 export interface SquareOrder {

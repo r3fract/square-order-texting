@@ -156,7 +156,8 @@ export class FakeSquare implements SquareApi {
         gross_sales_money: cad(unit * qty),
       };
     });
-    const tax = Math.round(subtotal * 0.13);
+    // Like real Square: catalog taxes only apply when the order asks for them.
+    const tax = order.pricing_options?.auto_apply_taxes ? Math.round(subtotal * 0.13) : 0;
     return { line_items, total_tax_money: cad(tax), total_discount_money: cad(0), total_money: cad(subtotal + tax) };
   }
   async calculateOrder(order: SquareOrderInput) {
